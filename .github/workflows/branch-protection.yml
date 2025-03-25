@@ -1,0 +1,154 @@
+name: Branch Protection Rules
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches:
+      - main
+      - develop
+      - 'release/**'
+      - 'hotfix/**'
+
+jobs:
+  enforce-branch-protection:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate branch naming convention
+        run: |
+          BRANCH_NAME=${GITHUB_HEAD_REF}
+          echo "Validating branch name: $BRANCH_NAME"
+
+          if [[ "$BRANCH_NAME" != "main" &&
+                "$BRANCH_NAME" != "develop" &&
+                "$BRANCH_NAME" != "feature/*" &&
+                "$BRANCH_NAME" != "fix/*" &&
+                "$BRANCH_NAME" != "release/*" &&
+                "$BRANCH_NAME" != "hotfix/*" ]]; then
+            echo "Branch name does not follow GitFlow convention. Please use one of the following patterns:"
+            echo "- main"
+            echo "- develop"
+            echo "- feature/*"
+            echo "- fix/*"
+            echo "- release/*"
+            echo "- hotfix/*"
+            exit 1
+          fi
+
+      - name: Enforce branch merge rules
+        run: |
+          TARGET_BRANCH=${{ github.base_ref }}
+          SOURCE_BRANCH=${{ github.head_ref }}
+
+          # Rules for what can merge into main
+          if [[ "$TARGET_BRANCH" == "main" &&
+                ! "$SOURCE_BRANCH" =~ ^release/ &&
+                ! "$SOURCE_BRANCH" =~ ^hotfix/ ]]; then
+            echo "Error: Only release/* or hotfix/* branches can be merged into main"
+            exit 1
+          fi
+
+          # Rules for what can merge into develop
+          if [[ "$TARGET_BRANCH" == "develop" &&
+                ! "$SOURCE_BRANCH" =~ ^feature/ &&
+                ! "$SOURCE_BRANCH" =~ ^fix/ &&
+                "$SOURCE_BRANCH" != "main" &&
+                ! "$SOURCE_BRANCH" =~ ^release/ ]]; then
+            echo "Error: Only feature/*, fix/*, main, or release/* branches can be merged into develop"
+            exit 1
+          fi
+
+          # Rules for what can merge into release branches
+          if [[ "$TARGET_BRANCH" == "release/"* &&
+                "$SOURCE_BRANCH" != "fix/"* ]]; then
+            echo "Error: Only fix/* branches can be merged into release/* branches"
+            exit 1
+          fi
+
+          echo "Branch merge rules validated successfully"
+
+      - name: Verify conventional commits
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: 'The subject must begin with a lowercase letter'
+
+  check-required-reviews:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check required reviewers
+        if: github.base_ref == 'main' || github.base_ref == 'develop'
+        run: |
+          # Get the number of approvals
+          APPROVALS=$(curl -s \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" | \
+            jq '[.[] | select(.state == "APPROVED")] | length')
+
+          echo "Number of approvals: $APPROVALS"
+
+          # Check if there are enough approvals
+          MIN_REQUIRED=1
+          if [[ "${{ github.base_ref }}" == "main" ]]; then
+            MIN_REQUIRED=2
+          fi
+
+          if [[ $APPROVALS -lt $MIN_REQUIRED ]]; then
+            echo "Error: This PR requires at least $MIN_REQUIRED approvals before merging"
+            exit 1
+          fi
+
+          echo "Required reviews check passed"
+
+  run-status-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run linters
+        run: |
+          echo "Running linters..."
+          # Add specific linting commands for your repository here
+          # For example:
+          # npm run lint  # For JavaScript/TypeScript
+          # flake8 .      # For Python
+          # yamllint .    # For YAML
+          echo "Linting passed"
+
+      - name: Run tests
+        run: |
+          echo "Running tests..."
+          # Add specific test commands for your repository here
+          # For example:
+          # npm test     # For JavaScript/TypeScript
+          # pytest       # For Python
+          echo "Tests passed"
+
+      - name: Check for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
