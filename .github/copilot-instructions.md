@@ -73,15 +73,16 @@ These instructions guide GitHub Copilot to generate code that adheres to best pr
 
 ---
 
-## Branch Management
-
-- Never work directly on main/master
-- Create feature branches: `git checkout -b feature/<feature-name>` using kebab-case
-- Keep features small and focused
-- Use pull requests for code reviews
-- Commit often with descriptive messages
-- Commit Message Format: - 📝 Be extremely detailed with file changes - 🤔 Explain the reasoning behind each change - 🎨 Use relevant emojis to categorize changes - Example: "✨ feat(auth): Add JWT token validation to login endpoint - 🔧 Modified: src/auth/jwt_validator.py - 📦 Added: tests/auth/test_jwt_validator.py - 🔥 Removed: old token validation logic
-  Why: Improves security by implementing industry-standard JWT validation"
+## Commit Message Format
+- 📝 Be extremely detailed with file changes
+- 🤔 Explain the reasoning behind each change
+- 🎨 Use relevant emojis to categorize changes
+- Examples:
+  - ✨ feat(auth): Add JWT token validation to login endpoint
+  - 🔧 Modified: src/auth/jwt_validator.py
+  - 📦 Added: tests/auth/test_jwt_validator.py
+  - 🔥 Removed: old token validation logic
+  - 🤔 Why: Improves security by implementing industry-standard JWT validation"
 
 ---
 
