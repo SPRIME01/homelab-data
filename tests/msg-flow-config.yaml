@@ -1,0 +1,203 @@
+# Configuration for message flow tests in the homelab data mesh
+
+# RabbitMQ connection configuration
+rabbitmq:
+  host: "rabbitmq.data.svc.cluster.local"
+  port: 5672
+  username: ${RABBITMQ_USERNAME}
+  password: ${RABBITMQ_PASSWORD}
+  vhost: "prod"
+  heartbeat: 60
+  connection_attempts: 3
+  retry_delay: 5
+
+# Monitoring settings
+metrics:
+  enabled: true
+  port: 9090
+  prefix: "test_msg_flow"
+  labels:
+    app: "message-flow-tests"
+    component: "testing"
+
+# External service endpoints
+services:
+  influxdb:
+    url: "http://influxdb.data.svc.cluster.local:8086"
+    token: ${INFLUXDB_TOKEN}
+    org: "homelab"
+    bucket: "tests"
+
+  minio:
+    endpoint: "minio.storage.svc.cluster.local:9000"
+    access_key: ${MINIO_ACCESS_KEY}
+    secret_key: ${MINIO_SECRET_KEY}
+    secure: true
+    bucket: "test-artifacts"
+
+  triton:
+    url: "http://triton-inference-server.ai.svc.cluster.local:8000"
+    timeout: 10.0
+
+# Flow configurations
+flows:
+  # Simple flow - direct message passing
+  simple_flow:
+    input_exchange: "test.input"
+    output_queues: ["test.output"]
+    routing_key: "test.simple"
+    batch_size: 100
+    timeout: 30
+    verify_order: false
+    max_latency_ms: 500
+    expected_transformations: []
+
+  # Transformation flow - messages undergo transformations
+  transform_flow:
+    input_exchange: "test.input"
+    output_queues: ["test.transformed", "test.archive"]
+    routing_key: "test.transform"
+    batch_size: 50
+    timeout: 60
+    verify_order: true
+    max_latency_ms: 1000
+    expected_transformations:
+      - description: "Temperature conversion from C to F"
+        check: "lambda x: 'temp_f' in x and abs(x['temp_f'] - (x['temp_c'] * 9/5 + 32)) < 0.001"
+      - description: "Timestamp should be ISO format"
+        check: "lambda x: 'timestamp' in x and x['timestamp'].endswith('Z')"
+      - description: "Metadata enrichment"
+        check: "lambda x: 'metadata' in x and 'processed_by' in x['metadata']"
+
+  # Time series flow - metrics data
+  timeseries_flow:
+    input_exchange: "metrics"
+    output_queues: ["metrics.processed", "metrics.storage"]
+    routing_key: "metrics.system"
+    batch_size: 100
+    timeout: 30
+    verify_order: false
+    max_latency_ms: 500
+    expected_transformations:
+      - description: "Downsampling applied"
+        check: "lambda x: 'downsampled' in x"
+      - description: "Statistics calculated"
+        check: "lambda x: all(k in x for k in ['min', 'max', 'avg', 'count'])"
+
+  # AI inference flow - request/response
+  inference_flow:
+    input_exchange: "ai.requests"
+    output_queues: ["ai.results"]
+    routing_key: "ai.inference.#"
+    batch_size: 20
+    timeout: 120
+    verify_order: true
+    max_latency_ms: 5000
+    expected_transformations:
+      - description: "Contains inference results"
+        check: "lambda x: 'results' in x"
+      - description: "Confidence scores available"
+        check: "lambda x: 'confidence' in x['results']"
+
+  # Event flow - triggers and notifications
+  event_flow:
+    input_exchange: "events"
+    output_queues: ["events.processed", "notifications"]
+    routing_key: "events.#"
+    batch_size: 50
+    timeout: 30
+    verify_order: false
+    max_latency_ms: 1000
+    expected_transformations:
+      - description: "Event categorized"
+        check: "lambda x: 'category' in x"
+      - description: "Priority assigned"
+        check: "lambda x: 'priority' in x"
+
+# Test data generators
+data_generators:
+  sensor:
+    temperature:
+      min: 18.0
+      max: 28.0
+      unit: "C"
+      locations: ["living_room", "kitchen", "bedroom", "bathroom", "office"]
+    humidity:
+      min: 30.0
+      max: 70.0
+      unit: "%"
+      locations: ["living_room", "kitchen", "bedroom", "bathroom", "office"]
+    motion:
+      states: [true, false]
+      locations: ["entrance", "hallway", "living_room", "kitchen"]
+
+  metrics:
+    system:
+      types: ["cpu", "memory", "disk", "network"]
+      hosts: ["server1", "server2", "nas", "pi4", "desktop"]
+    application:
+      services: ["nginx", "postgres", "rabbitmq", "influxdb", "homeassistant"]
+      metrics: ["requests", "errors", "latency", "connections"]
+
+  events:
+    types: ["motion_detected", "door_opened", "window_opened", "device_offline", "battery_low"]
+    locations: ["front_door", "back_door", "garage", "driveway", "garden"]
+    priorities: ["low", "medium", "high", "critical"]
+
+# Schema validation
+schemas:
+  enabled: true
+  schemas_dir: "/home/sprime01/homelab/homelab-data/schemas"
+  validation_mode: "strict"  # strict, warn, skip
+
+# Performance testing
+performance:
+  warmup_runs: 5
+  test_runs: 10
+  batch_sizes: [1, 10, 100, 1000]
+  concurrent_publishers: [1, 2, 4, 8]
+  concurrent_consumers: [1, 2, 4, 8]
+
+# Error handling and resilience tests
+error_handling:
+  test_invalid_messages: true
+  test_schema_violations: true
+  test_service_failures: true
+  delay_before_retry: 3  # seconds
+  max_retries: 3
+
+# Test output
+output:
+  directory: "/home/sprime01/homelab/homelab-data/tests/results"
+  formats: ["json", "html", "markdown"]
+  send_notifications: true
+  notification_channels:
+    - type: "slack"
+      webhook: "${SLACK_WEBHOOK}"
+    - type: "email"
+      recipients: ["admin@homelab.local"]
+
+# Visualization config
+visualizations:
+  enabled: true
+  flow_diagrams: true
+  timing_charts: true
+  error_distribution: true
+  comparison_charts: true
+
+# CI/CD integration
+ci_cd:
+  github_actions:
+    enabled: true
+    artifacts_path: "test-results"
+    badge_enabled: true
+  airflow:
+    enabled: true
+    dag_id: "message_flow_tests"
+    schedule: "0 4 * * *"  # Daily at 4 AM
+
+# Test environment
+environment:
+  reset_between_tests: true
+  clean_queues: true
+  create_exchanges: true

@@ -1,0 +1,123 @@
+# RabbitMQ connection configuration
+rabbitmq:
+  host: "rabbitmq.data.svc.cluster.local"
+  port: 5672
+  username: ${RABBITMQ_USERNAME}
+  password: ${RABBITMQ_PASSWORD}
+  vhost: "prod"
+  heartbeat: 60
+  connection_attempts: 3
+  retry_delay: 5
+
+# Schema validation
+schemas_dir: "/home/sprime01/homelab/homelab-data/schemas"
+
+# Test data location
+test_data_dir: "/home/sprime01/homelab/homelab-data/tests/test_data"
+
+# Output directory for test results
+output_dir: "/home/sprime01/homelab/homelab-data/tests/results"
+
+# Prometheus metrics server port
+prometheus_port: 9091
+
+# Test execution configuration
+parallelism: 8  # Number of parallel test executions
+default_timeout: 30  # Default timeout in seconds
+
+# Performance test configurations
+batch_sizes:
+  - 10
+  - 100
+  - 500
+  - 1000
+
+# Test duration for long-running tests
+test_duration: 60  # seconds
+
+# Consumer configurations for testing
+consumers:
+  # Data transformation service tests
+  transform:
+    input_queues:
+      - "sensors.temperature"
+      - "sensors.humidity"
+    output_queues:
+      - "metrics.processed"
+    dead_letter_queues:
+      - "sensors.failed"
+    expected_processing_time: 0.1  # seconds
+    expected_throughput: 100  # messages per second
+
+  # InfluxDB integration tests
+  influxdb:
+    input_queues:
+      - "metrics.processed"
+    expected_processing_time: 0.2  # seconds
+    expected_throughput: 500  # messages per second
+
+  # MinIO archiver tests
+  minio_archiver:
+    input_queues:
+      - "archive.events"
+      - "archive.metrics"
+    expected_processing_time: 1.0  # seconds
+    expected_throughput: 100  # messages per second
+
+  # AI inference service tests
+  inference:
+    input_queues:
+      - "ai.inference.requests"
+    output_queues:
+      - "ai.inference.results"
+    expected_processing_time: 2.0  # seconds
+    expected_throughput: 10  # messages per second
+
+# Test data schemas
+test_schemas:
+  - id: "sensor-reading"
+    fields:
+      - name: "sensor_id"
+        required: true
+        type: "string"
+      - name: "type"
+        required: true
+        type: "string"
+      - name: "value"
+        required: true
+        type: "number"
+      - name: "timestamp"
+        required: true
+        type: "string"
+        format: "date-time"
+
+  - id: "metrics-data"
+    fields:
+      - name: "metric_name"
+        required: true
+        type: "string"
+      - name: "value"
+        required: true
+        type: "number"
+      - name: "timestamp"
+        required: true
+        type: "string"
+        format: "date-time"
+
+# CI/CD integration settings
+ci_cd:
+  github_actions:
+    enabled: true
+    artifacts_path: "test-results"
+    badge_enabled: true
+
+  airflow:
+    enabled: true
+    dag_id: "consumer_tests"
+    schedule: "0 4 * * *"  # Daily at 4 AM
+
+# Test environment
+environment:
+  reset_between_tests: true
+  clean_queues: true
+  mock_services: false

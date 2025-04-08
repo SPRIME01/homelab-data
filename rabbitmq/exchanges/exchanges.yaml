@@ -1,0 +1,149 @@
+---
+version: "1.0"
+description: "RabbitMQ exchange definitions for homelab data mesh"
+
+# Home Automation Events Exchange
+home.events:
+  type: topic
+  durable: true
+  auto_delete: false
+  internal: false
+  arguments:
+    alternate-exchange: dead.letter
+  description: |
+    Primary exchange for home automation events.
+    Routing key format: home.<location>.<device_type>.<event_type>
+    Examples: home.living_room.light.state_changed, home.kitchen.sensor.motion_detected
+
+# Sensor Data Exchange
+sensors:
+  type: topic
+  durable: true
+  auto_delete: false
+  internal: false
+  arguments:
+    alternate-exchange: dead.letter
+  description: |
+    Exchange for all sensor data readings and telemetry.
+    Routing key format: sensors.<type>.<location>.<metric>
+    Examples: sensors.temperature.bedroom.celsius, sensors.humidity.bathroom.percent
+
+# AI Inference Exchange Group
+ai:
+  requests:
+    type: direct
+    durable: true
+    auto_delete: false
+    internal: false
+    arguments:
+      message-ttl: 30000  # 30 seconds TTL for requests
+    description: |
+      Exchange for AI inference requests.
+      Routing keys map directly to model names.
+      Example: llama2-chat, whisper-stt, yolo-detection
+
+  results:
+    type: topic
+    durable: true
+    auto_delete: false
+    internal: false
+    description: |
+      Exchange for AI inference results.
+      Routing key format: ai.model.<model_name>.<result_type>
+      Examples: ai.model.llama2.completion, ai.model.whisper.transcription
+
+# System Metrics Exchange
+metrics:
+  type: topic
+  durable: true
+  auto_delete: false
+  internal: false
+  arguments:
+    message-ttl: 300000  # 5 minutes TTL for metrics
+  description: |
+    Exchange for system and application metrics.
+    Routing key format: metrics.<source>.<type>.<name>
+    Examples: metrics.kubernetes.pod.memory, metrics.triton.model.latency
+
+# Alerts Exchange
+alerts:
+  critical:
+    type: fanout
+    durable: true
+    auto_delete: false
+    internal: false
+    arguments:
+      max-priority: 10
+    description: |
+      Exchange for critical system alerts requiring immediate attention.
+      All bound queues receive all messages due to fanout type.
+
+  notifications:
+    type: topic
+    durable: true
+    auto_delete: false
+    internal: false
+    arguments:
+      max-priority: 5
+    description: |
+      Exchange for general system notifications and non-critical alerts.
+      Routing key format: alerts.<severity>.<source>.<type>
+      Examples: alerts.warning.storage.disk_space, alerts.info.backup.completed
+
+# Dead Letter Exchange
+dead.letter:
+  type: fanout
+  durable: true
+  auto_delete: false
+  internal: true
+  description: |
+    Internal exchange for handling unroutable messages and expired messages.
+    Used as alternate-exchange for main exchanges.
+
+# Defaults for all exchanges
+defaults:
+  durable: true
+  auto_delete: false
+  internal: false
+  arguments:
+    alternate-exchange: dead.letter
+
+# Exchange policies
+policies:
+  - pattern: "^home\."
+    priority: 1
+    definition:
+      ha-mode: all
+      ha-sync-mode: automatic
+
+  - pattern: "^ai\."
+    priority: 2
+    definition:
+      ha-mode: exactly
+      ha-params: 2
+      ha-sync-mode: automatic
+
+  - pattern: "^metrics\."
+    priority: 1
+    definition:
+      ha-mode: all
+      ha-sync-mode: automatic
+      message-ttl: 300000
+
+  - pattern: "^alerts\."
+    priority: 3
+    definition:
+      ha-mode: all
+      ha-sync-mode: automatic
+      queue-mode: lazy
+
+# Operator notes
+notes: |
+  - All exchanges are durable by default for message persistence
+  - Dead letter exchange handles unroutable/expired messages
+  - HA policies ensure exchange replication across cluster
+  - Message TTL set where appropriate to prevent queue bloat
+  - Priority settings used for alerts and critical messages
+  - Topic exchanges used where routing flexibility needed
+  - Direct exchanges used for specific service-to-service communication
+  - Fanout exchanges used for broadcast scenarios

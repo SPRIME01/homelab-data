@@ -1,0 +1,123 @@
+# Triton Inference Request Handler Configuration
+
+# RabbitMQ connection settings
+rabbitmq:
+  host: "rabbitmq.data.svc.cluster.local" # Kubernetes service DNS
+  port: 5672
+  username: ${RABBITMQ_USERNAME}
+  password: ${RABBITMQ_PASSWORD}
+  vhost: "prod"
+  heartbeat: 60
+
+  # Exchange definitions
+  exchanges:
+    - name: "ai.requests"
+      type: "direct"
+      durable: true
+    - name: "ai.results"
+      type: "topic"
+      durable: true
+
+  # Queue definitions
+  queues:
+    - name: "ai.inference.requests"
+      durable: true
+      bindings:
+        - exchange: "ai.requests"
+          routing_key: "#"
+      message_ttl: 300000  # 5 minutes
+      max_priority: 10
+
+  # Response configuration
+  response_exchange: "ai.results"
+  response_routing_key: "ai.model.{model_name}.result"
+  prefetch_count: 10
+
+# Triton server configuration
+triton:
+  url: "triton-inference-server.ai.svc.cluster.local:8001"
+  client_type: "grpc"  # or "http"
+  timeout: 300  # seconds
+  ssl:
+    enabled: false
+    cert_file: "/etc/certs/tls.crt"
+    key_file: "/etc/certs/tls.key"
+    ca_file: "/etc/certs/ca.crt"
+
+# Model configurations
+models:
+  # Language Models
+  - name: "llama2-7b-chat-q4"
+    client_type: "grpc"  # override default
+    max_batch_size: 4
+    batch_timeout_ms: 200
+    inputs:
+      - name: "text_input"
+        preprocessing: "none"
+    metadata:
+      domain: "language"
+      description: "Llama 2 7B language model"
+
+  # Vision Models
+  - name: "yolov8n"
+    max_batch_size: 8
+    batch_timeout_ms: 100
+    inputs:
+      - name: "images"
+        preprocessing: "normalize"
+    metadata:
+      domain: "vision"
+      description: "YOLO v8 nano object detection model"
+
+  # Speech Models
+  - name: "whisper-base"
+    max_batch_size: 1
+    batch_timeout_ms: 100
+    inputs:
+      - name: "audio_signal"
+        preprocessing: "none"
+    metadata:
+      domain: "speech"
+      description: "Whisper base speech-to-text model"
+
+# Handler configuration
+handler:
+  max_workers: 10
+  logging_level: "INFO"
+  metrics_enabled: true
+  metrics_port: 8080
+
+# Error handling
+error_handling:
+  max_retries: 3
+  retry_delay_ms: 500
+  circuit_breaker_enabled: true
+  circuit_breaker_threshold: 5
+  circuit_breaker_reset_timeout: 30
+
+# Advanced features - now with MCP enabled
+advanced_features:
+  model_context_protocol:
+    enabled: true  # Enabled MCP
+    version: "v1"
+    context_ttl_seconds: 3600  # Extended TTL to 1 hour for longer conversations
+    context_store:
+      type: "redis"  # Using Redis as the context store
+      host: "redis.data.svc.cluster.local"
+      port: 6379
+      password: "${REDIS_PASSWORD}"
+      database: 0
+      key_prefix: "mcp:"
+    max_context_size: 16384  # 16KB max context size
+    default_models:
+      - "llama2-7b-chat-q4"  # Models that should use context by default
+
+  websockets:
+    enabled: false
+    port: 8081
+    path: "/ws/inference"
+
+  graphql:
+    enabled: false
+    port: 8082
+    path: "/graphql"

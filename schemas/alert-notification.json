@@ -1,0 +1,195 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://homelab.local/schemas/alert-notification.json",
+  "title": "Alert Notification",
+  "description": "Schema for alert notifications in the homelab data mesh",
+  "type": "object",
+  "version": "1.0.0",
+  "required": [
+    "alert_id",
+    "timestamp",
+    "severity",
+    "message"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Version of the schema being used",
+      "default": "1.0.0"
+    },
+    "alert_id": {
+      "type": "string",
+      "description": "Unique identifier for the alert",
+      "examples": ["alert_01H9GTQ7NXFH3ZX2D5JE3K4M5N"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp when the alert was generated"
+    },
+    "severity": {
+      "type": "string",
+      "description": "Severity level of the alert",
+      "enum": ["critical", "error", "warning", "info", "debug"],
+      "examples": ["warning"]
+    },
+    "message": {
+      "type": "string",
+      "description": "Alert message text",
+      "examples": ["CPU usage over 90% for more than 5 minutes"]
+    },
+    "title": {
+      "type": "string",
+      "description": "Brief title of the alert",
+      "examples": ["High CPU Usage"]
+    },
+    "source": {
+      "type": "object",
+      "description": "Source of the alert",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Type of source",
+          "examples": ["device", "service", "system", "user", "automation"]
+        },
+        "name": {
+          "type": "string",
+          "description": "Name of the source",
+          "examples": ["home-assistant", "node-exporter", "motion-sensor"]
+        },
+        "id": {
+          "type": "string",
+          "description": "Identifier of the source",
+          "examples": ["rpi4-master", "sensor.front_door_motion"]
+        },
+        "component": {
+          "type": "string",
+          "description": "Component within the source",
+          "examples": ["cpu", "memory", "disk", "network"]
+        }
+      }
+    },
+    "category": {
+      "type": "string",
+      "description": "Category of the alert",
+      "examples": ["system", "security", "home", "network", "custom"]
+    },
+    "details": {
+      "type": "object",
+      "description": "Detailed information about the alert",
+      "additionalProperties": true
+    },
+    "status": {
+      "type": "string",
+      "description": "Current status of the alert",
+      "enum": ["active", "acknowledged", "resolved"],
+      "default": "active"
+    },
+    "start_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp when the alert condition began"
+    },
+    "end_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp when the alert condition ended (for resolved alerts)"
+    },
+    "acknowledged_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp when the alert was acknowledged"
+    },
+    "acknowledged_by": {
+      "type": "string",
+      "description": "Who acknowledged the alert"
+    },
+    "rule_id": {
+      "type": "string",
+      "description": "Identifier of the rule that triggered the alert",
+      "examples": ["rule_cpu_usage_high"]
+    },
+    "actions": {
+      "type": "array",
+      "description": "Suggested or taken actions",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Type of action",
+            "examples": ["notification", "remediation", "escalation"]
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of the action"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "completed", "failed"]
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the action was taken"
+          }
+        }
+      }
+    },
+    "priority": {
+      "type": "integer",
+      "description": "Priority of the alert (1-10, higher is more important)",
+      "minimum": 1,
+      "maximum": 10
+    },
+    "tags": {
+      "type": "array",
+      "description": "Tags associated with the alert",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0.0",
+      "alert_id": "alert_01H9GTQ7NXFH3ZX2D5JE3K4M5N",
+      "timestamp": "2023-09-15T22:30:45.123Z",
+      "severity": "warning",
+      "title": "Motion Detected During Away Mode",
+      "message": "Motion was detected in the living room while the house is in away mode",
+      "source": {
+        "type": "device",
+        "name": "Living Room Motion Sensor",
+        "id": "binary_sensor.living_room_motion",
+        "component": "motion"
+      },
+      "category": "security",
+      "details": {
+        "last_triggered": "2023-09-15T22:29:55Z",
+        "consecutive_detections": 3,
+        "has_camera": true,
+        "confidence": 0.95
+      },
+      "status": "active",
+      "start_time": "2023-09-15T22:29:55Z",
+      "rule_id": "rule_motion_during_away",
+      "priority": 8,
+      "actions": [
+        {
+          "type": "notification",
+          "description": "Sent push notification to household members",
+          "status": "completed",
+          "timestamp": "2023-09-15T22:30:46Z"
+        },
+        {
+          "type": "remediation",
+          "description": "Capturing video clip from living room camera",
+          "status": "pending"
+        }
+      ],
+      "tags": ["security", "motion", "away_mode"]
+    }
+  ],
+  "additionalProperties": false
+}

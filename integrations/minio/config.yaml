@@ -1,0 +1,179 @@
+# RabbitMQ connection settings
+rabbitmq:
+  host: "rabbitmq.data.svc.cluster.local"
+  port: 5672
+  username: ${RABBITMQ_USERNAME}
+  password: ${RABBITMQ_PASSWORD}
+  vhost: "prod"
+  prefetch_count: 100
+  heartbeat: 60
+  connection_attempts: 3
+  retry_delay: 5
+
+# MinIO connection settings
+minio:
+  endpoint: "minio.storage.svc.cluster.local:9000"
+  access_key: ${MINIO_ACCESS_KEY}
+  secret_key: ${MINIO_SECRET_KEY}
+  secure: true
+  region: "local"
+
+  # Bucket configuration
+  buckets:
+    - name: "homeassistant-events"
+      prefix: "events/"
+      retention:
+        days: 90
+      tiering:
+        - name: "warm"
+          days: 30
+          storage_class: "STANDARD_IA"
+        - name: "cold"
+          days: 60
+          storage_class: "GLACIER"
+
+    - name: "sensor-data"
+      prefix: "sensors/"
+      retention:
+        days: 365
+      tiering:
+        - name: "warm"
+          days: 30
+          storage_class: "STANDARD_IA"
+        - name: "cold"
+          days: 90
+          storage_class: "GLACIER"
+
+    - name: "metrics"
+      prefix: "system/"
+      retention:
+        days: 30
+      tiering:
+        - name: "archive"
+          days: 7
+          storage_class: "STANDARD_IA"
+
+# Archival configuration
+archival:
+  # Compression settings
+  compression:
+    algorithm: "zstd"
+    level: 3  # 1-10, higher = better compression but slower
+
+  # Batch settings
+  batch:
+    max_size: 1000  # messages per batch
+    max_age: 300    # seconds before forcing batch write
+    check_interval: 60  # seconds between batch checks
+    jitter: 0.1    # random delay factor to prevent thundering herd
+
+  # Archive configurations
+  archives:
+    # Home Assistant events
+    - queues:
+        - "home.events.#"
+      bucket: "homeassistant-events"
+      batch_size: 1000
+      batch_age: 300
+      partition_by:
+        - year
+        - month
+        - day
+        - hour
+      metadata:
+        source: "home_assistant"
+        type: "events"
+
+    # Sensor readings
+    - queues:
+        - "sensors.temperature.#"
+        - "sensors.humidity.#"
+        - "sensors.motion.#"
+      bucket: "sensor-data"
+      batch_size: 5000
+      batch_age: 600
+      partition_by:
+        - year
+        - month
+        - day
+      metadata:
+        source: "sensors"
+        type: "readings"
+
+    # System metrics
+    - queues:
+        - "metrics.system.#"
+        - "metrics.application.#"
+      bucket: "metrics"
+      batch_size: 10000
+      batch_age: 300
+      partition_by:
+        - year
+        - month
+        - day
+        - hour
+      metadata:
+        source: "system"
+        type: "metrics"
+
+# Error handling
+error_handling:
+  max_retries: 3
+  retry_delay: 5  # seconds
+  dead_letter_exchange: "dead.letter"
+  dead_letter_queue: "archival.failed"
+
+# Monitoring settings
+monitoring:
+  metrics_port: 8000
+  health_check:
+    enabled: true
+    port: 8080
+    path: "/health"
+
+  # Prometheus metric labels
+  labels:
+    app: "data-archiver"
+    component: "storage"
+    team: "data"
+
+# Performance tuning
+performance:
+  max_workers: 4  # Number of worker threads
+  buffer_size: 10000  # Message buffer size
+  minio_client_pool: 5  # Number of MinIO client connections
+  max_concurrent_uploads: 10
+
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "data_archiver.log"
+  rotation:
+    max_bytes: 10485760  # 10MB
+    backup_count: 5
+
+# Resource limits
+resources:
+  memory_limit: "1Gi"
+  cpu_limit: "1"
+  memory_request: "512Mi"
+  cpu_request: "500m"
+
+# Metadata templates
+metadata_templates:
+  event:
+    schema_version: "1.0"
+    content_type: "application/json"
+    compression: "zstd"
+    archived_at: "${TIMESTAMP}"
+    source: "homelab"
+
+  batch:
+    schema_version: "1.0"
+    content_type: "application/json"
+    compression: "zstd"
+    batch_id: "${BATCH_ID}"
+    first_message_time: "${FIRST_MESSAGE_TIME}"
+    last_message_time: "${LAST_MESSAGE_TIME}"
+    message_count: "${MESSAGE_COUNT}"

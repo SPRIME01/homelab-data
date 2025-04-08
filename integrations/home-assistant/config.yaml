@@ -1,0 +1,86 @@
+rabbitmq:
+  host: "rabbitmq.data.svc.cluster.local"  # Kubernetes service DNS
+  port: 5672
+  username: ${RABBITMQ_USERNAME}
+  password: ${RABBITMQ_PASSWORD}
+  default_exchange: "home.events"
+  batch_size: 100
+  batch_timeout: 5  # seconds
+
+  # Exchange definitions
+  exchanges:
+    - name: "home.events"
+      type: "topic"
+    - name: "home.states"
+      type: "topic"
+    - name: "home.alerts"
+      type: "fanout"
+
+  # Routing configuration
+  routing:
+    - domain: "state_changed"
+      event_type: "*"
+      exchange: "home.states"
+      routing_key: "home.state.{domain}"
+
+    - domain: "automation"
+      event_type: "*"
+      exchange: "home.events"
+      routing_key: "home.automation.{event_type}"
+
+    - domain: "*"
+      event_type: "*"
+      exchange: "home.events"
+      routing_key: "home.events.{domain}.{event_type}"
+
+  # Queue configuration
+  queues:
+    commands:
+      - name: "home.commands.high_priority"
+        prefetch_count: 1
+        ttl: 300000  # 5 minutes
+        max_priority: 10
+      - name: "home.commands.normal"
+        prefetch_count: 5
+        ttl: 600000  # 10 minutes
+        max_priority: 5
+    results:
+      name: "home.commands.results"
+      ttl: 86400000  # 24 hours
+
+home_assistant:
+  url: "http://home-assistant.apps.svc.cluster.local:8123"
+  token: ${HASS_TOKEN}
+  api_password: ${HASS_API_PASSWORD}  # if needed
+  webhook_token: ${HASS_WEBHOOK_TOKEN}
+
+webhook:
+  host: "0.0.0.0"
+  port: 8080
+  path: "/webhook/events"
+
+logging:
+  level: ${LOG_LEVEL}
+  file: "ha_integration.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+retry_config:
+  max_attempts: 3
+  initial_delay: 1.0  # seconds
+  max_delay: 30.0    # seconds
+  exponential_base: 2.0
+
+monitoring:
+  enabled: true
+  metrics_port: 9090
+  health_check_interval: 30  # seconds
+
+# Security settings
+security:
+  allowed_ips:
+    - "10.0.0.0/8"      # Internal network
+    - "192.168.0.0/16"  # Local network
+  ssl:
+    enabled: false
+    cert_file: "/etc/certs/tls.crt"
+    key_file: "/etc/certs/tls.key"

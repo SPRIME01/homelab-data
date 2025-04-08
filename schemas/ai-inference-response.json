@@ -1,0 +1,110 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://homelab.local/schemas/ai-inference-response.json",
+  "title": "AI Inference Response",
+  "description": "Schema for AI inference responses in the homelab data mesh",
+  "type": "object",
+  "version": "1.0.0",
+  "required": [
+    "request_id",
+    "model_name",
+    "timestamp",
+    "outputs"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Version of the schema being used",
+      "default": "1.0.0"
+    },
+    "request_id": {
+      "type": "string",
+      "description": "Unique identifier for the original inference request",
+      "examples": ["req_01H9GTQ7NXFH3ZX2D5JE3K4M5N"]
+    },
+    "model_name": {
+      "type": "string",
+      "description": "Name of the AI model used for inference",
+      "examples": ["whisper-stt", "llama2-7b-chat", "yolov8"]
+    },
+    "model_version": {
+      "type": "string",
+      "description": "Version of the model used",
+      "examples": ["1.0", "v2"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp when the response was created"
+    },
+    "outputs": {
+      "type": "object",
+      "description": "Model output data",
+      "additionalProperties": true,
+      "examples": [
+        {
+          "text": "Based on the motion sensor data, there is currently no one in the living room."
+        }
+      ]
+    },
+    "processing_time_ms": {
+      "type": "number",
+      "description": "Time taken to process the inference in milliseconds",
+      "minimum": 0
+    },
+    "success": {
+      "type": "boolean",
+      "description": "Whether the inference was successful"
+    },
+    "error": {
+      "type": "object",
+      "description": "Error information if the inference failed",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Error code"
+        },
+        "message": {
+          "type": "string",
+          "description": "Error message"
+        },
+        "details": {
+          "type": "object",
+          "description": "Additional error details",
+          "additionalProperties": true
+        }
+      },
+      "required": ["code", "message"]
+    },
+    "context_id": {
+      "type": "string",
+      "description": "Conversation or session context ID for stateful models",
+      "examples": ["session_01H9GTQ7NXFH3ZX2D5JE3K4M5N"]
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional metadata about the response",
+      "additionalProperties": true
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0.0",
+      "request_id": "req_01H9GTQ7NXFH3ZX2D5JE3K4M5N",
+      "model_name": "llama2-7b-chat",
+      "model_version": "q4",
+      "timestamp": "2023-09-15T19:15:23.452Z",
+      "outputs": {
+        "text": "Based on the motion sensor data, there is currently no one in the living room. The last motion was detected 45 minutes ago."
+      },
+      "processing_time_ms": 587.23,
+      "success": true,
+      "context_id": "session_01H9GTQ7NXFH3ZX2D5JE3K4M5N",
+      "metadata": {
+        "tokens_generated": 22,
+        "tokens_in_context": 78
+      }
+    }
+  ],
+  "additionalProperties": false
+}

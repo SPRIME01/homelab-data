@@ -1,0 +1,139 @@
+# Configuration for sensor data enrichment pipeline
+
+name: sensor-enrichment-pipeline
+description: Enriches sensor data with derived metrics and metadata
+
+# RabbitMQ connection settings
+rabbitmq:
+  host: ${RABBITMQ_HOST}
+  port: 5672
+  vhost: ${RABBITMQ_VHOST}
+  username: ${RABBITMQ_USERNAME}
+  password: ${RABBITMQ_PASSWORD}
+  heartbeat: 60
+  connection_attempts: 5
+  retry_delay: 5
+
+# Schema validation configuration
+schema_validation:
+  enabled: true
+  schemas_dir: /home/sprime01/homelab/homelab-data/schemas
+
+# Performance tuning
+performance:
+  prefetch_count: 10
+  max_workers: 8
+
+# Monitoring settings
+monitoring:
+  metrics:
+    enabled: true
+    port: 8000
+
+# Resource declarations (optional, will create if missing)
+declare_resources:
+  exchanges:
+    - name: sensors
+      type: topic
+      durable: true
+    - name: metrics
+      type: topic
+      durable: true
+  queues:
+    - name: sensor_readings
+      durable: true
+      arguments:
+        x-message-ttl: 86400000  # 24 hours
+      bindings:
+        - exchange: sensors
+          routing_key: readings.#
+    - name: enriched_metrics
+      durable: true
+      bindings:
+        - exchange: metrics
+          routing_key: enriched.#
+
+# Source queues to consume from
+sources:
+  - queue: sensor_readings
+    name: sensor-readings
+    retry:
+      policy: requeue
+      max_retries: 3
+      dead_letter_exchange: dead_letter
+      dead_letter_routing_key: sensors.failed
+    # Source-specific transformations (applied first)
+    transformations:
+      - name: validate-sensor-schema
+        type: schema_validate
+        schema_id: sensor-reading
+        mode: validate
+
+# Global transformations (applied to all messages)
+transformations:
+  - name: enrich-sensor-data
+    type: enrich
+    enrichment_type: static
+    values:
+      metadata.pipeline: "sensor-enrichment"
+      metadata.processed_at: "${TIMESTAMP}"
+
+  - name: add-timestamp
+    type: enrich
+    enrichment_type: timestamp
+    target_field: metadata.timestamp
+    format: "%Y-%m-%dT%H:%M:%S.%fZ"
+    add_iso: true
+    add_epoch: true
+
+  - name: extract-location
+    type: map
+    mapping:
+      location.room: "location.room"
+      location.floor: "location.floor"
+      location.area: "location.area"
+      device_type: "device.type"
+    include_original: true
+
+  - name: calculate-derived-metrics
+    type: custom_derive_metrics
+    source_field: value
+    target_field: derived_metrics
+    continue_on_error: true
+
+  - name: filter-invalid-readings
+    type: filter
+    mode: all
+    conditions:
+      - field: value
+        operator: gt
+        value: -100
+      - field: value
+        operator: lt
+        value: 100
+      - field: sensor_id
+        operator: exists
+
+# Destinations to publish results to
+destinations:
+  - name: enriched-metrics
+    exchange: metrics
+    routing_key: enriched.{type}.{location.room}
+    content_type: application/json
+
+  - name: archival
+    exchange: archive
+    routing_key: sensors.enriched
+    content_type: application/json
+
+# Custom transformations to load
+custom_transformations:
+  modules:
+    - homelab.transformations.sensor_transforms
+    - homelab.transformations.utility_transforms
+
+# Logging configuration
+logging:
+  level: INFO
+  file: logs/sensor_pipeline.log
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'

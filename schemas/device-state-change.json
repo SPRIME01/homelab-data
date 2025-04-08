@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://homelab.local/schemas/device-state-change.json",
+  "title": "Device State Change",
+  "description": "Schema for device state change events in the homelab data mesh",
+  "type": "object",
+  "version": "1.0.0",
+  "required": [
+    "device_id",
+    "entity_id",
+    "timestamp",
+    "old_state",
+    "new_state"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Version of the schema being used",
+      "default": "1.0.0"
+    },
+    "device_id": {
+      "type": "string",
+      "description": "Unique identifier for the device",
+      "examples": ["zigbee_light_kitchen_01"]
+    },
+    "entity_id": {
+      "type": "string",
+      "description": "Unique entity identifier (typically in domain.entity format)",
+      "examples": ["light.kitchen_main"]
+    },
+    "domain": {
+      "type": "string",
+      "description": "Domain of the entity (derived from entity_id)",
+      "examples": ["light", "switch", "sensor", "binary_sensor", "climate"]
+    },
+    "friendly_name": {
+      "type": "string",
+      "description": "Human readable name of the entity",
+      "examples": ["Kitchen Main Light"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp when the state change occurred"
+    },
+    "old_state": {
+      "type": ["object", "string", "number", "boolean", "null"],
+      "description": "Previous state of the device"
+    },
+    "new_state": {
+      "type": ["object", "string", "number", "boolean", "null"],
+      "description": "New state of the device"
+    },
+    "context": {
+      "type": "object",
+      "description": "Context information about the state change",
+      "properties": {
+        "id": { "type": "string" },
+        "parent_id": { "type": "string" },
+        "user_id": { "type": "string" }
+      }
+    },
+    "source": {
+      "type": "string",
+      "description": "Source of the state change",
+      "examples": ["user", "system", "automation", "script"]
+    },
+    "attributes": {
+      "type": "object",
+      "description": "Additional attributes related to the state",
+      "additionalProperties": true
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0.0",
+      "device_id": "zigbee_light_kitchen_01",
+      "entity_id": "light.kitchen_main",
+      "domain": "light",
+      "friendly_name": "Kitchen Main Light",
+      "timestamp": "2023-09-15T18:30:25.125Z",
+      "old_state": {
+        "state": "off",
+        "brightness": 0
+      },
+      "new_state": {
+        "state": "on",
+        "brightness": 255,
+        "color_temp": 370
+      },
+      "context": {
+        "id": "01H9GTQ7NXFH3ZX2D5JE3K4M5N",
+        "parent_id": null,
+        "user_id": "user_1234"
+      },
+      "source": "user",
+      "attributes": {
+        "friendly_name": "Kitchen Main Light",
+        "supported_features": ["brightness", "color_temp"],
+        "device_class": "light"
+      }
+    }
+  ],
+  "additionalProperties": false
+}

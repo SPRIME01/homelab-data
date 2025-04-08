@@ -1,0 +1,117 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://homelab.local/schemas/ai-inference-request.json",
+  "title": "AI Inference Request",
+  "description": "Schema for AI inference requests in the homelab data mesh",
+  "type": "object",
+  "version": "1.0.0",
+  "required": [
+    "request_id",
+    "model_name",
+    "inputs"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Version of the schema being used",
+      "default": "1.0.0"
+    },
+    "request_id": {
+      "type": "string",
+      "description": "Unique identifier for the inference request",
+      "examples": ["req_01H9GTQ7NXFH3ZX2D5JE3K4M5N"]
+    },
+    "model_name": {
+      "type": "string",
+      "description": "Name of the AI model to use for inference",
+      "examples": ["whisper-stt", "llama2-7b-chat", "yolov8"]
+    },
+    "model_version": {
+      "type": "string",
+      "description": "Version of the model (optional)",
+      "examples": ["1.0", "v2"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp when the request was created"
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Model input data",
+      "additionalProperties": true,
+      "examples": [
+        {
+          "text": "What's the weather like today?",
+          "options": {
+            "max_tokens": 100
+          }
+        }
+      ]
+    },
+    "outputs": {
+      "type": "array",
+      "description": "List of output names to return (optional)",
+      "items": {
+        "type": "string"
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "description": "Additional parameters for the inference",
+      "additionalProperties": true
+    },
+    "priority": {
+      "type": "integer",
+      "description": "Priority of the request (higher numbers = higher priority)",
+      "minimum": 0,
+      "maximum": 10,
+      "default": 5
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "description": "Request timeout in milliseconds",
+      "minimum": 0,
+      "default": 30000
+    },
+    "source": {
+      "type": "string",
+      "description": "Source system that generated the request",
+      "examples": ["home-assistant", "n8n", "user-interface"]
+    },
+    "context_id": {
+      "type": "string",
+      "description": "Conversation or session context ID for stateful models",
+      "examples": ["session_01H9GTQ7NXFH3ZX2D5JE3K4M5N"]
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional metadata about the request",
+      "additionalProperties": true
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0.0",
+      "request_id": "req_01H9GTQ7NXFH3ZX2D5JE3K4M5N",
+      "model_name": "llama2-7b-chat",
+      "model_version": "q4",
+      "timestamp": "2023-09-15T19:15:22.857Z",
+      "inputs": {
+        "text": "Is anyone in the living room right now?",
+        "temperature": 0.7,
+        "max_tokens": 100
+      },
+      "outputs": ["text"],
+      "parameters": {
+        "stream": false,
+        "stop_sequences": ["\n", "###"]
+      },
+      "priority": 7,
+      "timeout_ms": 30000,
+      "source": "home-assistant",
+      "context_id": "session_01H9GTQ7NXFH3ZX2D5JE3K4M5N"
+    }
+  ],
+  "additionalProperties": false
+}

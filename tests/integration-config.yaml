@@ -1,0 +1,29 @@
+rabbitmq:
+  host: "rabbitmq.data.svc.cluster.local"
+  port: 5672
+  username: ${RABBITMQ_USERNAME}
+  password: ${RABBITMQ_PASSWORD}
+  vhost: "/"
+
+flows:
+  simple_flow:
+    input_exchange: "test.input"
+    output_queues: ["test.output"]
+    routing_key: "test.#"
+    batch_size: 100
+    timeout: 30
+    verify_order: false
+    expected_transformations: []
+
+  transform_flow:
+    input_exchange: "data.input"
+    output_queues: ["data.processed", "data.archive"]
+    routing_key: "data.raw"
+    batch_size: 50
+    timeout: 60
+    verify_order: true
+    expected_transformations:
+      - description: "Data should be normalized"
+        check: "lambda x: 0 <= x['value'] <= 1"
+      - description: "Timestamp should be ISO format"
+        check: "lambda x: x['timestamp'].endswith('Z')"

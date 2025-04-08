@@ -1,0 +1,205 @@
+---
+# MQTT Integration Configuration
+mqtt:
+  broker: !secret mqtt_broker_host
+  port: !secret mqtt_broker_port
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  client_id: homeassistant_prod
+  protocol: "3.1.1"
+  birth_message:
+    topic: "homeassistant/status"
+    payload: "online"
+    qos: 1
+    retain: true
+  will_message:
+    topic: "homeassistant/status"
+    payload: "offline"
+    qos: 1
+    retain: true
+  discovery: true
+  discovery_prefix: homeassistant
+
+# State Publishing Configuration
+homeassistant:
+  customize:
+    package.node_anchors:
+      common_publish: &common_publish
+        qos: 1
+        retain: true
+        optimistic: false
+
+# MQTT Sensors
+mqtt_sensors:
+  # AI Inference Results
+  - platform: mqtt
+    state_topic: "ai/inference/results/#"
+    name: "AI Inference Results"
+    unique_id: "ai_inference_results"
+    value_template: "{{ value_json.result }}"
+    json_attributes_topic: "ai/inference/results/#"
+    json_attributes_template: "{{ value_json | tojson }}"
+    availability:
+      topic: "homeassistant/status"
+      payload_available: "online"
+      payload_not_available: "offline"
+
+  # System Metrics
+  - platform: mqtt
+    state_topic: "metrics/system/#"
+    name: "System Metrics"
+    unique_id: "system_metrics"
+    value_template: "{{ value_json.value }}"
+    json_attributes_topic: "metrics/system/#"
+    json_attributes_template: "{{ value_json | tojson }}"
+    unit_of_measurement: "%"
+    availability:
+      topic: "homeassistant/status"
+      payload_available: "online"
+      payload_not_available: "offline"
+
+# MQTT Binary Sensors
+binary_sensor:
+  # Motion Detection Events
+  - platform: mqtt
+    state_topic: "sensors/motion/#"
+    name: "Motion Detection"
+    unique_id: "motion_detection"
+    device_class: motion
+    payload_on: "detected"
+    payload_off: "clear"
+    availability:
+      topic: "homeassistant/status"
+      payload_available: "online"
+      payload_not_available: "offline"
+
+# MQTT Triggers for Automation
+automation:
+  # AI Inference Response Trigger
+  - alias: "AI Inference Response Handler"
+    trigger:
+      platform: mqtt
+      topic: "ai/inference/results/+"
+    condition:
+      condition: template
+      value_template: "{{ trigger.payload_json is defined }}"
+    action:
+      service: script.handle_ai_inference
+      data_template:
+        model: "{{ trigger.topic.split('/')[-1] }}"
+        result: "{{ trigger.payload_json }}"
+
+  # Critical Alert Handler
+  - alias: "Critical Alert Handler"
+    trigger:
+      platform: mqtt
+      topic: "alerts/critical/#"
+    condition:
+      condition: template
+      value_template: "{{ trigger.payload_json.severity == 'critical' }}"
+    action:
+      service: notify.persistent_notification
+      data_template:
+        title: "Critical Alert"
+        message: "{{ trigger.payload_json.message }}"
+
+# MQTT State Publishing
+sensor:
+  # Publish device states
+  - platform: mqtt
+    state_topic: "homeassistant/sensor/{{ states('sensor.device_id') }}/state"
+    name: "Device State"
+    unique_id: "device_state"
+    <<: *common_publish
+    value_template: "{{ states('sensor.device_state') }}"
+
+# MQTT Event Publishing
+mqtt_publish:
+  # State Changes
+  - topic: "home/events/state_changes"
+    payload: >-
+      {
+        "entity_id": "{{ trigger.entity_id }}",
+        "from_state": "{{ trigger.from_state.state }}",
+        "to_state": "{{ trigger.to_state.state }}",
+        "timestamp": "{{ now().isoformat() }}"
+      }
+    qos: 1
+    retain: false
+
+  # Device Events
+  - topic: "home/events/device_events"
+    payload: >-
+      {
+        "device_id": "{{ trigger.device_id }}",
+        "event_type": "{{ trigger.event_type }}",
+        "event_data": {{ trigger.event_data | tojson }}
+      }
+    qos: 1
+    retain: false
+
+# MQTT Discovery
+mqtt_discovery:
+  # Enable automated device discovery
+  enabled: true
+  prefix: homeassistant
+  interval: 300  # seconds
+
+  # Device Information
+  device_info:
+    name: "Home Assistant Instance"
+    manufacturer: "Homelab"
+    model: "HA Core"
+    sw_version: !include .HA_VERSION
+
+# Topic Structure
+mqtt_topic_structure:
+  # Home Events
+  home_events:
+    base_topic: "home/events"
+    state_changes: "home/events/state_changes"
+    device_events: "home/events/device_events"
+    automations: "home/events/automations"
+
+  # Sensors
+  sensors:
+    base_topic: "sensors"
+    temperature: "sensors/temperature"
+    humidity: "sensors/humidity"
+    motion: "sensors/motion"
+    presence: "sensors/presence"
+
+  # AI Inference
+  ai_inference:
+    base_topic: "ai/inference"
+    requests: "ai/inference/requests"
+    results: "ai/inference/results"
+
+  # Metrics
+  metrics:
+    base_topic: "metrics"
+    system: "metrics/system"
+    application: "metrics/application"
+
+  # Alerts
+  alerts:
+    base_topic: "alerts"
+    critical: "alerts/critical"
+    warning: "alerts/warning"
+    info: "alerts/info"
+
+# Retain Settings
+mqtt_retain_settings:
+  state_changes: false
+  device_events: false
+  sensor_readings: true
+  metrics: true
+  alerts: false
+
+# QoS Settings
+mqtt_qos_settings:
+  state_changes: 1
+  device_events: 1
+  sensor_readings: 1
+  metrics: 1
+  alerts: 2

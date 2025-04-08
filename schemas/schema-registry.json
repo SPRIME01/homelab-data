@@ -1,0 +1,157 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://homelab.local/schemas/schema-registry.json",
+  "title": "Schema Registry",
+  "description": "Registry of all schemas used in the homelab data mesh",
+  "type": "object",
+  "version": "1.0.0",
+  "required": [
+    "schemas"
+  ],
+  "properties": {
+    "schemas": {
+      "type": "array",
+      "description": "List of all registered schemas",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "version",
+          "path"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for the schema"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of the schema"
+          },
+          "version": {
+            "type": "string",
+            "description": "Version of the schema"
+          },
+          "path": {
+            "type": "string",
+            "description": "Path to the schema file"
+          },
+          "description": {
+            "type": "string",
+            "description": "Brief description of the schema"
+          },
+          "deprecated": {
+            "type": "boolean",
+            "description": "Whether this schema version is deprecated",
+            "default": false
+          },
+          "topic_mappings": {
+            "type": "array",
+            "description": "RabbitMQ topics associated with this schema",
+            "items": {
+              "type": "string"
+            }
+          },
+          "exchange_mappings": {
+            "type": "array",
+            "description": "RabbitMQ exchanges associated with this schema",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schemas": [
+        {
+          "id": "sensor-reading",
+          "name": "Sensor Reading",
+          "version": "1.0.0",
+          "path": "/homelab-data/schemas/sensor-reading.json",
+          "description": "Schema for sensor readings in the homelab data mesh",
+          "topic_mappings": [
+            "sensors.temperature.#",
+            "sensors.humidity.#",
+            "sensors.motion.#"
+          ],
+          "exchange_mappings": [
+            "sensors"
+          ]
+        },
+        {
+          "id": "device-state-change",
+          "name": "Device State Change",
+          "version": "1.0.0",
+          "path": "/homelab-data/schemas/device-state-change.json",
+          "description": "Schema for device state change events in the homelab data mesh",
+          "topic_mappings": [
+            "home.events.*.state_changed"
+          ],
+          "exchange_mappings": [
+            "home.events"
+          ]
+        },
+        {
+          "id": "ai-inference-request",
+          "name": "AI Inference Request",
+          "version": "1.0.0",
+          "path": "/homelab-data/schemas/ai-inference-request.json",
+          "description": "Schema for AI inference requests in the homelab data mesh",
+          "topic_mappings": [
+            "ai.requests.#"
+          ],
+          "exchange_mappings": [
+            "ai.requests"
+          ]
+        },
+        {
+          "id": "ai-inference-response",
+          "name": "AI Inference Response",
+          "version": "1.0.0",
+          "path": "/homelab-data/schemas/ai-inference-response.json",
+          "description": "Schema for AI inference responses in the homelab data mesh",
+          "topic_mappings": [
+            "ai.results.#"
+          ],
+          "exchange_mappings": [
+            "ai.results"
+          ]
+        },
+        {
+          "id": "system-metric",
+          "name": "System Metric",
+          "version": "1.0.0",
+          "path": "/homelab-data/schemas/system-metric.json",
+          "description": "Schema for system metrics in the homelab data mesh",
+          "topic_mappings": [
+            "metrics.system.#",
+            "metrics.application.#"
+          ],
+          "exchange_mappings": [
+            "metrics"
+          ]
+        },
+        {
+          "id": "alert-notification",
+          "name": "Alert Notification",
+          "version": "1.0.0",
+          "path": "/homelab-data/schemas/alert-notification.json",
+          "description": "Schema for alert notifications in the homelab data mesh",
+          "topic_mappings": [
+            "alerts.critical.#",
+            "alerts.warning.#",
+            "alerts.info.#"
+          ],
+          "exchange_mappings": [
+            "alerts.critical",
+            "alerts.notifications"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,171 @@
+---
+version: "1.0"
+description: "RabbitMQ bindings for homelab data mesh"
+
+# Home Assistant Event Bindings
+home_assistant_bindings:
+  # State Changes
+  - source: "home.events"
+    destination: "home.events.state_changes"
+    destination_type: "queue"
+    routing_key: "home.*.*.state_changed"
+    arguments:
+      x-match: "all"
+      x-priority: 5
+
+  # Automation Triggers
+  - source: "home.events"
+    destination: "home.events.automations"
+    destination_type: "queue"
+    routing_key: "home.*.*.trigger"
+    arguments:
+      x-match: "all"
+      x-priority: 8
+
+# Sensor Data Bindings
+sensor_bindings:
+  # Temperature Sensors
+  - source: "sensors"
+    destination: "metrics.system"
+    destination_type: "queue"
+    routing_key: "sensors.temperature.#"
+    arguments:
+      x-message-ttl: 7200000  # 2 hours
+
+  # Humidity Sensors
+  - source: "sensors"
+    destination: "metrics.system"
+    destination_type: "queue"
+    routing_key: "sensors.humidity.#"
+    arguments:
+      x-message-ttl: 7200000
+
+  # Motion Sensors
+  - source: "sensors"
+    destination: "home.events.automations"
+    destination_type: "queue"
+    routing_key: "sensors.motion.#"
+    arguments:
+      x-priority: 10
+
+# AI Inference Bindings
+ai_bindings:
+  # Inference Requests
+  - source: "ai.requests"
+    destination: "ai.inference.requests"
+    destination_type: "queue"
+    routing_key: "llama2-chat"
+    arguments:
+      x-priority: 5
+
+  - source: "ai.requests"
+    destination: "ai.inference.requests"
+    destination_type: "queue"
+    routing_key: "whisper-stt"
+    arguments:
+      x-priority: 7
+
+  # Inference Results
+  - source: "ai.results"
+    destination: "ai.inference.results"
+    destination_type: "queue"
+    routing_key: "ai.model.#"
+    arguments:
+      x-priority: 5
+
+# Metrics Bindings
+metrics_bindings:
+  # System Metrics
+  - source: "metrics"
+    destination: "metrics.system"
+    destination_type: "queue"
+    routing_key: "metrics.system.#"
+    arguments:
+      x-message-ttl: 7200000
+
+  # Application Metrics
+  - source: "metrics"
+    destination: "metrics.application"
+    destination_type: "queue"
+    routing_key: "metrics.application.#"
+    arguments:
+      x-message-ttl: 7200000
+
+# Alert Bindings
+alert_bindings:
+  # Critical Alerts
+  - source: "alerts.critical"
+    destination: "alerts.critical"
+    destination_type: "queue"
+    routing_key: "#"  # Fanout exchange - all messages
+    arguments:
+      x-priority: 10
+
+  # Normal Notifications
+  - source: "alerts.notifications"
+    destination: "alerts.notifications"
+    destination_type: "queue"
+    routing_key: "alerts.*.#"
+    arguments:
+      x-priority: 5
+
+# Archival Bindings
+archive_bindings:
+  # Event Archive
+  - source: "home.events"
+    destination: "archive.events"
+    destination_type: "queue"
+    routing_key: "#"
+    arguments:
+      x-message-ttl: 2592000000  # 30 days
+
+  # Metrics Archive
+  - source: "metrics"
+    destination: "archive.metrics"
+    destination_type: "queue"
+    routing_key: "#"
+    arguments:
+      x-message-ttl: 2592000000  # 30 days
+
+# Dead Letter Bindings
+dead_letter_bindings:
+  - source: "dead.letter"
+    destination: "dead.letter.queue"
+    destination_type: "queue"
+    routing_key: "#"
+    arguments:
+      x-message-ttl: 604800000  # 7 days
+
+# Routing Key Patterns
+routing_patterns:
+  home_automation:
+    - "home.<location>.<device>.<action>"
+    - "home.<location>.<device>.<state>"
+    - "home.<location>.<sensor>.<metric>"
+
+  sensors:
+    - "sensors.<type>.<location>.<metric>"
+    - "sensors.<type>.<device_id>.<reading>"
+
+  ai_inference:
+    - "ai.model.<model_name>.<action>"
+    - "ai.model.<model_name>.<result_type>"
+
+  metrics:
+    - "metrics.<source>.<type>.<name>"
+    - "metrics.<service>.<endpoint>.<metric>"
+
+  alerts:
+    - "alerts.<severity>.<source>.<type>"
+    - "alerts.<severity>.<location>.<event>"
+
+# Notes for operators
+notes: |
+  - All bindings include appropriate TTL settings
+  - Priority levels range from 1 (lowest) to 10 (highest)
+  - Dead letter bindings catch unroutable messages
+  - Archive bindings keep messages for 30 days
+  - Routing keys follow consistent hierarchical patterns
+  - Critical alerts use fanout exchange for immediate delivery
+  - Sensor data is routed to both metrics and automation queues
+  - AI inference requests/results are separated for scalability

@@ -1,0 +1,156 @@
+# InfluxDB Consumer Configuration
+
+# RabbitMQ connection settings
+rabbitmq:
+  host: "rabbitmq.data.svc.cluster.local"
+  port: 5672
+  username: ${RABBITMQ_USERNAME}
+  password: ${RABBITMQ_PASSWORD}
+  vhost: "prod"
+  prefetch_count: 100
+
+  # Queue definitions
+  queues:
+    - name: "sensors.temperature"
+      durable: true
+    - name: "sensors.humidity"
+      durable: true
+    - name: "metrics.system"
+      durable: true
+    - name: "metrics.application"
+      durable: true
+
+# InfluxDB connection settings
+influxdb:
+  url: "http://influxdb.data.svc.cluster.local:8086"
+  token: ${INFLUXDB_TOKEN}
+  org: "homelab"
+  bucket: "sensors"
+
+  # Batch writing configuration
+  batch_size: 1000
+  batch_interval: 10.0  # seconds
+  flush_interval: 10000  # milliseconds
+  jitter_interval: 1000  # milliseconds
+  retry_interval: 5000  # milliseconds
+  max_retries: 3
+  max_retry_delay: 30000  # milliseconds
+
+  # Retention policies
+  retention_policies:
+    - name: "raw_data"
+      database: "sensors"
+      duration: "7d"
+      replication: 1
+      default: true
+    - name: "downsampled_1h"
+      database: "sensors"
+      duration: "30d"
+      replication: 1
+    - name: "downsampled_1d"
+      database: "sensors"
+      duration: "365d"
+      replication: 1
+
+  # Continuous queries for downsampling
+  continuous_queries:
+    - name: "cq_downsample_1h"
+      database: "sensors"
+      resample_every: "1h"
+      query: >
+        SELECT mean("value") AS "value",
+               max("value") AS "max_value",
+               min("value") AS "min_value",
+               count("value") AS "sample_count"
+        INTO "downsampled_1h"."sensors"
+        FROM "raw_data"."sensors"
+        GROUP BY time(1h), *
+
+    - name: "cq_downsample_1d"
+      database: "sensors"
+      resample_every: "1d"
+      query: >
+        SELECT mean("value") AS "value",
+               max("value") AS "max_value",
+               min("value") AS "min_value",
+               count("value") AS "sample_count"
+        INTO "downsampled_1d"."sensors"
+        FROM "downsampled_1h"."sensors"
+        GROUP BY time(1d), *
+
+# Message to measurement mappings
+mappings:
+  # Temperature sensors
+  - queue: "sensors.temperature"
+    measurement: "temperature"
+    tags:
+      location: "location"
+      sensor_id: "sensor_id"
+      type: "type"
+    fields:
+      value:
+        path: "value"
+        type: "float"
+      battery:
+        path: "battery"
+        type: "int"
+    timestamp: "timestamp"
+
+  # Humidity sensors
+  - queue: "sensors.humidity"
+    measurement: "humidity"
+    tags:
+      location: "location"
+      sensor_id: "sensor_id"
+      type: "type"
+    fields:
+      value:
+        path: "value"
+        type: "float"
+      battery:
+        path: "battery"
+        type: "int"
+    timestamp: "timestamp"
+
+  # System metrics
+  - queue: "metrics.system"
+    measurement: "system_metrics"
+    tags:
+      host: "host"
+      service: "service"
+      instance: "instance"
+    fields:
+      cpu_usage:
+        path: "cpu.usage"
+        type: "float"
+      memory_used:
+        path: "memory.used"
+        type: "float"
+      disk_used:
+        path: "disk.used"
+        type: "float"
+    timestamp: "timestamp"
+
+  # Application metrics
+  - queue: "metrics.application"
+    measurement: "application_metrics"
+    tags:
+      app: "app_name"
+      instance: "instance_id"
+      environment: "env"
+    fields:
+      requests:
+        path: "metrics.requests"
+        type: "int"
+      latency:
+        path: "metrics.latency"
+        type: "float"
+      errors:
+        path: "metrics.errors"
+        type: "int"
+    timestamp: "timestamp"
+
+# Prometheus metrics configuration
+metrics:
+  enabled: true
+  port: 8000

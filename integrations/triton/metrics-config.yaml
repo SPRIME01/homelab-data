@@ -1,0 +1,93 @@
+# Triton Metrics Publisher Configuration
+
+rabbitmq:
+  host: "rabbitmq.data.svc.cluster.local"
+  port: 5672
+  username: ${RABBITMQ_USERNAME}
+  password: ${RABBITMQ_PASSWORD}
+  vhost: "prod"
+  exchange:
+    name: "metrics"
+    type: "topic"
+  routing_key: "metrics.triton.{type}"
+
+triton:
+  host: "triton-inference-server.ai.svc.cluster.local"
+  metrics_port: 8002
+  timeout: 5  # seconds
+
+metrics:
+  collection_interval: 15  # seconds
+  batch_size: 100
+  collect:
+    # Model metrics
+    - name: "nv_inference_request_success"
+      type: "counter"
+      include_labels: ["model", "version"]
+      description: "Number of successful inference requests"
+
+    - name: "nv_inference_request_failure"
+      type: "counter"
+      include_labels: ["model", "version"]
+      description: "Number of failed inference requests"
+
+    - name: "nv_inference_queue_duration_us"
+      type: "gauge"
+      include_labels: ["model"]
+      aggregation: "avg"
+      description: "Time spent in queue before inference"
+
+    - name: "nv_inference_compute_duration_us"
+      type: "gauge"
+      include_labels: ["model"]
+      aggregation: "avg"
+      description: "Time spent computing inference"
+
+    # GPU metrics
+    - name: "nv_gpu_utilization"
+      type: "gauge"
+      include_labels: ["gpu_uuid"]
+      description: "GPU utilization rate"
+
+    - name: "nv_gpu_memory_total_bytes"
+      type: "gauge"
+      include_labels: ["gpu_uuid"]
+      description: "Total GPU memory"
+
+    - name: "nv_gpu_memory_used_bytes"
+      type: "gauge"
+      include_labels: ["gpu_uuid"]
+      description: "Used GPU memory"
+
+    # Cache metrics
+    - name: "nv_cache_hit_count"
+      type: "counter"
+      include_labels: ["model"]
+      description: "Number of cache hits"
+
+    - name: "nv_cache_miss_count"
+      type: "counter"
+      include_labels: ["model"]
+      description: "Number of cache misses"
+
+    # System metrics
+    - name: "nv_process_cpu_time_seconds"
+      type: "counter"
+      include_labels: []
+      description: "Total CPU time"
+
+    - name: "nv_process_memory_bytes"
+      type: "gauge"
+      include_labels: []
+      description: "Process memory usage"
+
+logging:
+  level: "INFO"
+  file: "triton_metrics_publisher.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Error handling
+error_handling:
+  max_retries: 3
+  retry_delay: 5  # seconds
+  connection_timeout: 10  # seconds

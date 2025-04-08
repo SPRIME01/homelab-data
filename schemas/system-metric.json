@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://homelab.local/schemas/system-metric.json",
+  "title": "System Metric",
+  "description": "Schema for system metrics in the homelab data mesh",
+  "type": "object",
+  "version": "1.0.0",
+  "required": [
+    "metric_name",
+    "timestamp",
+    "value"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Version of the schema being used",
+      "default": "1.0.0"
+    },
+    "metric_name": {
+      "type": "string",
+      "description": "Name of the metric",
+      "examples": ["cpu_usage", "memory_usage", "disk_space", "network_in"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp when the metric was recorded"
+    },
+    "value": {
+      "type": ["number", "string", "boolean"],
+      "description": "Metric value"
+    },
+    "unit": {
+      "type": "string",
+      "description": "Unit of measurement",
+      "examples": ["%", "MB", "GB", "Mbps", "ms"]
+    },
+    "host": {
+      "type": "string",
+      "description": "Name of the host/system the metric is from",
+      "examples": ["rpi4-master", "nuc-worker1", "synology-nas"]
+    },
+    "component": {
+      "type": "string",
+      "description": "System component the metric relates to",
+      "examples": ["kubernetes", "docker", "database", "web_server"]
+    },
+    "instance": {
+      "type": "string",
+      "description": "Specific instance identifier (pod name, container id, etc.)",
+      "examples": ["home-assistant-5d4f8b9c76-x2jvl"]
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Kubernetes namespace or logical grouping",
+      "examples": ["default", "monitoring", "apps", "system"]
+    },
+    "type": {
+      "type": "string",
+      "description": "Type of metric",
+      "enum": ["gauge", "counter", "histogram", "summary", "custom"]
+    },
+    "interval": {
+      "type": "number",
+      "description": "Sampling interval in seconds",
+      "examples": [10, 30, 60]
+    },
+    "tags": {
+      "type": "object",
+      "description": "Additional tags for the metric",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "aggregation": {
+      "type": "object",
+      "description": "Aggregation information if this is an aggregated metric",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["avg", "min", "max", "sum", "count", "percentile"]
+        },
+        "window": {
+          "type": "string",
+          "description": "Aggregation time window",
+          "examples": ["1m", "5m", "1h", "1d"]
+        },
+        "source_metrics": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Source metrics used for aggregation"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0.0",
+      "metric_name": "cpu_usage_percent",
+      "timestamp": "2023-09-15T20:05:12.325Z",
+      "value": 42.7,
+      "unit": "%",
+      "host": "rpi4-master",
+      "component": "kubernetes",
+      "instance": "home-assistant-5d4f8b9c76-x2jvl",
+      "namespace": "apps",
+      "type": "gauge",
+      "interval": 30,
+      "tags": {
+        "environment": "prod",
+        "pod_type": "app",
+        "node_role": "master"
+      }
+    }
+  ],
+  "additionalProperties": false
+}

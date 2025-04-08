@@ -1,0 +1,132 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://homelab.local/schemas/sensor-reading.json",
+  "title": "Sensor Reading",
+  "description": "Schema for sensor readings in the homelab data mesh",
+  "type": "object",
+  "version": "1.0.0",
+  "required": [
+    "sensor_id",
+    "value",
+    "timestamp",
+    "type"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Version of the schema being used",
+      "default": "1.0.0"
+    },
+    "sensor_id": {
+      "type": "string",
+      "description": "Unique identifier for the sensor",
+      "examples": ["living_room_temperature_01"]
+    },
+    "type": {
+      "type": "string",
+      "description": "Type of sensor measurement",
+      "enum": ["temperature", "humidity", "pressure", "motion", "light", "power", "energy", "voltage", "current", "binary", "custom"],
+      "examples": ["temperature"]
+    },
+    "value": {
+      "oneOf": [
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "string" },
+        { "type": "array" }
+      ],
+      "description": "The measured value from the sensor"
+    },
+    "raw_value": {
+      "type": ["number", "string", "null"],
+      "description": "The raw unprocessed value from the sensor (optional)"
+    },
+    "unit": {
+      "type": "string",
+      "description": "Unit of measurement",
+      "examples": ["°C", "%", "hPa", "lux", "W", "kWh", "V", "A"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp when the reading was taken"
+    },
+    "accuracy": {
+      "type": "number",
+      "description": "Accuracy of the reading (if available)",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "location": {
+      "type": "object",
+      "description": "Physical location of the sensor",
+      "properties": {
+        "room": { "type": "string" },
+        "area": { "type": "string" },
+        "floor": { "type": "string" },
+        "coordinates": {
+          "type": "object",
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "z": { "type": "number" }
+          }
+        }
+      }
+    },
+    "device": {
+      "type": "object",
+      "description": "Information about the device this sensor belongs to",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "manufacturer": { "type": "string" },
+        "model": { "type": "string" },
+        "sw_version": { "type": "string" }
+      }
+    },
+    "battery": {
+      "type": "number",
+      "description": "Battery level percentage (for battery-powered sensors)",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "status": {
+      "type": "string",
+      "description": "Status of the sensor",
+      "enum": ["online", "offline", "error", "low_battery", "unknown"]
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional metadata about the reading",
+      "additionalProperties": true
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0.0",
+      "sensor_id": "living_room_temperature_01",
+      "type": "temperature",
+      "value": 21.5,
+      "raw_value": 21.5,
+      "unit": "°C",
+      "timestamp": "2023-09-15T14:22:10.500Z",
+      "accuracy": 0.5,
+      "location": {
+        "room": "living_room",
+        "area": "north_wall",
+        "floor": "main"
+      },
+      "device": {
+        "id": "zwave_node_05",
+        "name": "Living Room Multisensor",
+        "manufacturer": "Aeotec",
+        "model": "ZW074",
+        "sw_version": "1.15"
+      },
+      "battery": 85,
+      "status": "online"
+    }
+  ],
+  "additionalProperties": false
+}

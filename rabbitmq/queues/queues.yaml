@@ -1,0 +1,198 @@
+---
+version: "1.0"
+description: "RabbitMQ queue definitions for homelab data mesh"
+
+# Default queue settings that will be inherited by all queues unless overridden
+defaults:
+  durable: true
+  auto_delete: false
+  exclusive: false
+  arguments:
+    dead-letter-exchange: "dead.letter"
+    dead-letter-routing-key: "dead.letter.default"
+
+# Home Assistant Event Processing Queues
+home_assistant:
+  event_processing:
+    state_changes:
+      name: "home.events.state_changes"
+      description: "Processes state changes from Home Assistant entities"
+      vhost: "prod"
+      durable: true
+      arguments:
+        x-message-ttl: 86400000  # 24 hours
+        x-max-length: 100000
+        x-queue-mode: "lazy"  # Store messages on disk for persistence
+        x-dead-letter-exchange: "dead.letter"
+        x-dead-letter-routing-key: "home.events.dlq"
+        x-max-priority: 10
+
+    automations:
+      name: "home.events.automations"
+      description: "Handles automation triggers and actions"
+      vhost: "prod"
+      durable: true
+      arguments:
+        x-message-ttl: 3600000  # 1 hour
+        x-max-length: 50000
+        x-queue-mode: "default"
+        x-dead-letter-exchange: "dead.letter"
+        x-dead-letter-routing-key: "home.automations.dlq"
+        x-max-priority: 5
+
+# AI Inference Processing Queues
+ai_inference:
+  requests:
+    name: "ai.inference.requests"
+    description: "Queues inference requests for AI models"
+    vhost: "prod"
+    durable: true
+    arguments:
+      x-message-ttl: 300000  # 5 minutes
+      x-max-length: 10000
+      x-queue-mode: "default"
+      x-dead-letter-exchange: "dead.letter"
+      x-dead-letter-routing-key: "ai.inference.dlq"
+      x-max-priority: 10
+      x-queue-type: "quorum"  # Use quorum queues for high reliability
+
+  results:
+    name: "ai.inference.results"
+    description: "Stores inference results for processing"
+    vhost: "prod"
+    durable: true
+    arguments:
+      x-message-ttl: 600000  # 10 minutes
+      x-max-length: 20000
+      x-queue-mode: "default"
+      x-dead-letter-exchange: "dead.letter"
+      x-dead-letter-routing-key: "ai.results.dlq"
+      x-max-priority: 5
+      x-queue-type: "quorum"
+
+# Metrics Collection Queues
+metrics:
+  system:
+    name: "metrics.system"
+    description: "System-level metrics from all services"
+    vhost: "prod"
+    durable: true
+    arguments:
+      x-message-ttl: 7200000  # 2 hours
+      x-max-length: 1000000
+      x-queue-mode: "lazy"
+      x-dead-letter-exchange: "dead.letter"
+      x-dead-letter-routing-key: "metrics.system.dlq"
+
+  application:
+    name: "metrics.application"
+    description: "Application-specific metrics"
+    vhost: "prod"
+    durable: true
+    arguments:
+      x-message-ttl: 7200000  # 2 hours
+      x-max-length: 1000000
+      x-queue-mode: "lazy"
+      x-dead-letter-exchange: "dead.letter"
+      x-dead-letter-routing-key: "metrics.application.dlq"
+
+# Alert Handling Queues
+alerts:
+  critical:
+    name: "alerts.critical"
+    description: "High-priority alerts requiring immediate attention"
+    vhost: "prod"
+    durable: true
+    arguments:
+      x-message-ttl: 86400000  # 24 hours
+      x-max-length: 10000
+      x-queue-mode: "default"
+      x-dead-letter-exchange: "dead.letter"
+      x-dead-letter-routing-key: "alerts.critical.dlq"
+      x-max-priority: 10
+      x-queue-type: "quorum"
+
+  notifications:
+    name: "alerts.notifications"
+    description: "General system notifications and non-critical alerts"
+    vhost: "prod"
+    durable: true
+    arguments:
+      x-message-ttl: 604800000  # 7 days
+      x-max-length: 50000
+      x-queue-mode: "lazy"
+      x-dead-letter-exchange: "dead.letter"
+      x-dead-letter-routing-key: "alerts.notifications.dlq"
+      x-max-priority: 5
+
+# Data Archiving Queues
+archiving:
+  events:
+    name: "archive.events"
+    description: "Long-term storage queue for important events"
+    vhost: "prod"
+    durable: true
+    arguments:
+      x-message-ttl: 2592000000  # 30 days
+      x-max-length: 1000000
+      x-queue-mode: "lazy"
+      x-dead-letter-exchange: "dead.letter"
+      x-dead-letter-routing-key: "archive.events.dlq"
+
+  metrics:
+    name: "archive.metrics"
+    description: "Long-term storage queue for aggregated metrics"
+    vhost: "prod"
+    durable: true
+    arguments:
+      x-message-ttl: 2592000000  # 30 days
+      x-max-length: 1000000
+      x-queue-mode: "lazy"
+      x-dead-letter-exchange: "dead.letter"
+      x-dead-letter-routing-key: "archive.metrics.dlq"
+
+# Dead Letter Queues
+dead_letter:
+  main:
+    name: "dead.letter.queue"
+    description: "Main dead letter queue for failed messages"
+    vhost: "prod"
+    durable: true
+    arguments:
+      x-message-ttl: 604800000  # 7 days
+      x-max-length: 100000
+      x-queue-mode: "lazy"
+
+# Queue Policies
+policies:
+  - pattern: "^home\."
+    priority: 1
+    definition:
+      ha-mode: all
+      ha-sync-mode: automatic
+      queue-master-locator: min-masters
+
+  - pattern: "^ai\."
+    priority: 2
+    definition:
+      ha-mode: exactly
+      ha-params: 2
+      ha-sync-mode: automatic
+      queue-master-locator: min-masters
+
+  - pattern: "^alerts\.critical"
+    priority: 3
+    definition:
+      ha-mode: all
+      ha-sync-mode: automatic
+      queue-master-locator: min-masters
+
+# Operator notes
+notes: |
+  - All queues are durable by default for message persistence
+  - Critical queues use quorum queues for guaranteed delivery
+  - Lazy queues used for archival and metrics to optimize memory
+  - TTL values can be adjusted based on specific needs
+  - Max lengths prevent unbounded queue growth
+  - Dead letter handling for failed message management
+  - Priority levels: 10 (highest) to 1 (lowest)
