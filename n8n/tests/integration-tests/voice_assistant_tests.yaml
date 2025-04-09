@@ -1,0 +1,172 @@
+# Voice Assistant Workflow Integration Tests
+workflow: "voice-assistant-automation"
+name: "Voice Assistant Integration Tests"
+
+# General test configuration
+config:
+  execution_timeout: 30  # Seconds
+  requires_mocks: ["home_assistant", "triton_inference"]
+
+# Mock configurations for this test set
+mocks:
+  triton_inference:
+    model_name: "nlu-intent-model"
+    input_name: "input_text"
+    output_name: "intent_output"
+    responses:
+      - input_contains: "turn on the lights"
+        response:
+          intent: "turn_on_device"
+          confidence: 0.92
+          entities:
+            - entity_type: "device"
+              value: "lights"
+              confidence: 0.94
+      - input_contains: "what's the temperature"
+        response:
+          intent: "get_temperature"
+          confidence: 0.88
+          entities: []
+      - input_contains: "set thermostat to 72"
+        response:
+          intent: "set_temperature"
+          confidence: 0.95
+          entities:
+            - entity_type: "temperature"
+              value: "72"
+              confidence: 0.97
+      - input_contains: "gibberish command 123"
+        response:
+          intent: "unknown"
+          confidence: 0.23
+          entities: []
+
+  home_assistant:
+    responses:
+      - url_contains: "api/services/light/turn_on"
+        method: "POST"
+        status: 200
+        body: {"result": "success"}
+      - url_contains: "api/services/climate/set_temperature"
+        method: "POST"
+        status: 200
+        body: {"result": "success"}
+      - default:
+          status: 200
+          body: {"result": "success"}
+
+# Test cases
+tests:
+  - name: "Turn On Lights Command"
+    input:
+      content:
+        command: "turn on the lights in the living room"
+        device:
+          entity_id: "voice.assistant"
+          friendly_name: "Voice Assistant"
+        session_id: "test-session-1"
+        user_id: "user123"
+        context: {}
+      properties:
+        messageId: "msg-lights-1"
+        timestamp: "2023-01-01T12:00:00Z"
+    expected:
+      has_error: false
+      output:
+        session_id: "test-session-1"
+        response: contains("turned on the lights")
+        conversation_active: false
+      home_assistant_calls:
+        - service: "light.turn_on"
+          entity_id: contains("light.living_room")
+
+  - name: "Set Temperature Command"
+    input:
+      content:
+        command: "set the thermostat to 72 degrees"
+        device:
+          entity_id: "voice.assistant"
+          friendly_name: "Voice Assistant"
+        session_id: "test-session-2"
+        user_id: "user123"
+        context: {}
+      properties:
+        messageId: "msg-temp-1"
+        timestamp: "2023-01-01T12:05:00Z"
+    expected:
+      has_error: false
+      output:
+        session_id: "test-session-2"
+        response: contains("set the temperature to 72")
+        conversation_active: false
+      home_assistant_calls:
+        - service: "climate.set_temperature"
+          temperature: 72
+
+  - name: "Incomplete Command - Needs Device"
+    input:
+      content:
+        command: "turn on"
+        device:
+          entity_id: "voice.assistant"
+          friendly_name: "Voice Assistant"
+        session_id: "test-session-3"
+        user_id: "user123"
+        context: {}
+      properties:
+        messageId: "msg-incomplete-1"
+        timestamp: "2023-01-01T12:10:00Z"
+    expected:
+      has_error: false
+      output:
+        session_id: "test-session-3"
+        response: contains("which device")
+        conversation_active: true
+      home_assistant_calls: []
+
+  - name: "Unknown Command"
+    input:
+      content:
+        command: "gibberish command 123"
+        device:
+          entity_id: "voice.assistant"
+          friendly_name: "Voice Assistant"
+        session_id: "test-session-4"
+        user_id: "user123"
+        context: {}
+      properties:
+        messageId: "msg-unknown-1"
+        timestamp: "2023-01-01T12:15:00Z"
+    expected:
+      has_error: false
+      output:
+        session_id: "test-session-4"
+        response: contains("don't understand")
+        conversation_active: false
+      home_assistant_calls: []
+
+  - name: "Home Assistant Error Handling"
+    input:
+      content:
+        command: "turn on the lights"
+        device:
+          entity_id: "voice.assistant"
+          friendly_name: "Voice Assistant"
+        session_id: "test-session-5"
+        user_id: "user123"
+        context: {}
+      properties:
+        messageId: "msg-error-1"
+        timestamp: "2023-01-01T12:20:00Z"
+    mock_overrides:
+      home_assistant:
+        - url_contains: "api/services/light/turn_on"
+          method: "POST"
+          status: 500
+          body: {"error": "Internal server error"}
+    expected:
+      has_error: false
+      output:
+        session_id: "test-session-5"
+        response: contains("sorry")
+        conversation_active: false

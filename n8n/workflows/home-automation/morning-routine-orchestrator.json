@@ -1,0 +1,430 @@
+{
+  "name": "Morning Routine Orchestrator",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Daily Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Get current time and determine if we should execute morning routine\nconst now = new Date();\nconst hour = now.getHours();\nconst minute = now.getMinutes();\nconst dayOfWeek = now.getDay(); // 0 = Sunday, 1 = Monday, etc.\n\n// Get user preferences from static data or database\nconst staticData = $getWorkflowStaticData('global');\nconst preferences = staticData.preferences || {\n  weekdayWakeupTime: { hour: 6, minute: 30 },\n  weekendWakeupTime: { hour: 8, minute: 0 },\n  workDays: [1, 2, 3, 4, 5], // Monday through Friday\n  gradualWakeup: true,\n  gradualWakeupMinutes: 15,\n  coffeeEnabled: true,\n  weatherReport: true,\n  trafficCheck: true\n};\n\n// Determine if today is a work day\nconst isWorkDay = preferences.workDays.includes(dayOfWeek);\n\n// Get target wake up time based on day type\nconst wakeupTime = isWorkDay \n  ? preferences.weekdayWakeupTime \n  : preferences.weekendWakeupTime;\n\n// Calculate pre-wakeup time for gradual wake-up sequence\nlet preWakeupTime = { ...wakeupTime };\nif (preferences.gradualWakeup) {\n  preWakeupTime.minute -= preferences.gradualWakeupMinutes;\n  if (preWakeupTime.minute < 0) {\n    preWakeupTime.hour -= 1;\n    preWakeupTime.minute += 60;\n  }\n}\n\n// Determine routine phase based on current time\nlet phase = 'none';\nif (hour === preWakeupTime.hour && minute === preWakeupTime.minute) {\n  phase = 'pre-wakeup';\n} else if (hour === wakeupTime.hour && minute === wakeupTime.minute) {\n  phase = 'wakeup';\n} else if (hour === wakeupTime.hour && minute === wakeupTime.minute + 10) {\n  phase = 'post-wakeup';\n}\n\nreturn {\n  json: {\n    phase,\n    isWorkDay,\n    wakeupTime,\n    preWakeupTime,\n    preferences,\n    currentTime: { hour, minute },\n    executeRoutine: phase !== 'none',\n    timestamp: now.toISOString()\n  }\n};"
+      },
+      "name": "Determine Routine Phase",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.executeRoutine }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Should Execute?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "mode": "chooseBranch",
+        "output": "={{ $json.phase }}"
+      },
+      "name": "Route By Phase",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [800, 240]
+    },
+    {
+      "parameters": {
+        "url": "http://homeassistant.local:8123/api/services/light/turn_on",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"entity_id\": \"light.bedroom\",\n  \"brightness\": 50,\n  \"rgb_color\": [255, 160, 70],\n  \"transition\": 180\n}"
+            }
+          ]
+        }
+      },
+      "name": "Start Gradual Light",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1000, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare a personalized good morning routine\nconst isWorkDay = $input.item.json.isWorkDay;\nconst preferences = $input.item.json.preferences;\n\n// Build a sequence of actions based on preferences\nconst actions = [];\n\n// Open blinds\nactions.push({\n  domain: 'cover',\n  service: 'set_cover_position',\n  data: {\n    entity_id: 'cover.bedroom_blinds',\n    position: 100\n  },\n  description: 'Opening bedroom blinds'\n});\n\n// Turn on lights fully\nactions.push({\n  domain: 'light',\n  service: 'turn_on',\n  data: {\n    entity_id: 'light.bedroom',\n    brightness: 255,\n    color_temp: 4500\n  },\n  description: 'Setting lights to energizing brightness'\n});\n\n// Start coffee if enabled\nif (preferences.coffeeEnabled) {\n  actions.push({\n    domain: 'switch',\n    service: 'turn_on',\n    data: {\n      entity_id: 'switch.coffee_maker'\n    },\n    description: 'Starting coffee maker'\n  });\n}\n\n// Play morning music\nactions.push({\n  domain: 'media_player',\n  service: 'play_media',\n  data: {\n    entity_id: 'media_player.bedroom_speaker',\n    media_content_id: isWorkDay ? 'media-source://media_source/local/morning_energetic.mp3' : 'media-source://media_source/local/morning_relaxed.mp3',\n    media_content_type: 'audio/mp3'\n  },\n  description: 'Playing morning music'\n});\n\nreturn {\n  json: {\n    ...$input.item.json,\n    actions,\n    morningMessage: isWorkDay \n      ? `Good morning! It's a work day. Your first meeting is at ${preferences.firstMeetingTime || '9:00 AM'}.` \n      : 'Good morning! Enjoy your day off.'\n  }\n};"
+      },
+      "name": "Build Wake-up Sequence",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1000, 240]
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "items": "={{ $json.actions }}"
+      },
+      "name": "Execute Actions in Parallel",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [1200, 240]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://homeassistant.local:8123/api/services/{{ $json.domain }}/{{ $json.service }}",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={{ $json.data }}"
+            }
+          ]
+        }
+      },
+      "name": "Call Home Assistant Service",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1400, 240]
+    },
+    {
+      "parameters": {
+        "batchSize": 0,
+        "mergeByFields": [
+          {
+            "parameter": null
+          }
+        ]
+      },
+      "name": "Wait for Actions to Complete",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1600, 240]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openweathermap.org/data/2.5/weather?lat={{$env.HOME_LAT}}&lon={{$env.HOME_LON}}&appid={{$env.OPENWEATHERMAP_API_KEY}}&units=metric",
+        "options": {}
+      },
+      "name": "Fetch Weather Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1000, 380]
+    },
+    {
+      "parameters": {
+        "url": "https://maps.googleapis.com/maps/api/directions/json?origin={{$env.HOME_ADDRESS}}&destination={{$env.WORK_ADDRESS}}&departure_time=now&key={{$env.GOOGLE_MAPS_API_KEY}}",
+        "options": {}
+      },
+      "name": "Fetch Traffic Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1000, 520]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process weather and traffic data to create a morning briefing\nconst weatherData = $node['Fetch Weather Data'].json;\nconst trafficData = $node['Fetch Traffic Data'].json;\nconst isWorkDay = $json.isWorkDay;\n\n// Format weather information\nconst temperature = Math.round(weatherData.main.temp);\nconst weatherDescription = weatherData.weather[0].description;\nconst weatherMessage = `The current temperature is ${temperature}°C with ${weatherDescription}.`;\n\n// Format weather forecast\nlet forecastMessage = '';\nif (weatherData.rain) {\n  forecastMessage = ' Expect rain today, so take an umbrella!';\n} else if (weatherData.snow) {\n  forecastMessage = ' Expect snow today, so dress warmly!';\n}\n\n// Format commute information if it's a work day\nlet commuteMessage = '';\nif (isWorkDay && trafficData.routes && trafficData.routes.length > 0) {\n  const durationInTraffic = Math.round(trafficData.routes[0].legs[0].duration_in_traffic.value / 60);\n  const normalDuration = Math.round(trafficData.routes[0].legs[0].duration.value / 60);\n  \n  if (durationInTraffic > normalDuration * 1.2) {\n    commuteMessage = ` Your commute currently takes ${durationInTraffic} minutes due to heavy traffic. Consider leaving earlier.`;\n  } else {\n    commuteMessage = ` Your commute currently takes ${durationInTraffic} minutes with normal traffic.`;\n  }\n}\n\n// Combine all information into a morning briefing\nconst briefing = `${weatherMessage}${forecastMessage}${commuteMessage}`;\n\nreturn {\n  json: {\n    ...$json,\n    briefing,\n    temperature,\n    weatherCondition: weatherData.weather[0].main,\n    weatherDescription,\n    commuteTimeMinutes: isWorkDay && trafficData.routes ? Math.round(trafficData.routes[0].legs[0].duration_in_traffic.value / 60) : 0\n  }\n};"
+      },
+      "name": "Create Morning Briefing",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1200, 380]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/services/tts/google_translate_say",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"entity_id\": \"media_player.bedroom_speaker\",\n  \"message\": \"{{ $json.morningMessage }} {{ $json.briefing }}\"\n}"
+            }
+          ]
+        }
+      },
+      "name": "Announce Morning Briefing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1400, 380]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare personalized morning information display\nconst name = $getWorkflowStaticData('global').userName || 'User';\nconst weatherEmoji = {\n  'Clear': '☀️',\n  'Clouds': '☁️',\n  'Rain': '🌧️',\n  'Drizzle': '🌦️',\n  'Thunderstorm': '⛈️',\n  'Snow': '❄️',\n  'Mist': '🌫️',\n  'Fog': '🌫️',\n  'Haze': '🌫️'\n}[$json.weatherCondition] || '🌡️';\n\nconst cardData = {\n  type: 'custom:stack-in-card',\n  cards: [\n    {\n      type: 'markdown',\n      content: `# Good Morning, ${name}! ${weatherEmoji}\\n\\n**${$json.temperature}°C** · ${$json.weatherDescription}\\n\\n${$json.isWorkDay ? `🚗 **Commute**: ${$json.commuteTimeMinutes} mins` : '🏠 Enjoy your day off!'}`\n    }\n  ],\n  style: {\n    border_radius: '12px',\n    box_shadow: '3px 3px 10px rgba(0,0,0,0.2)',\n    padding: '12px'\n  }\n};\n\nreturn {\n  json: {\n    ...$json,\n    cardData: JSON.stringify(cardData)\n  }\n};"
+      },
+      "name": "Prepare Dashboard Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1200, 520]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/states/sensor.morning_briefing",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"state\": \"{{ $json.temperature }}°C\",\n  \"attributes\": {\n    \"friendly_name\": \"Morning Briefing\",\n    \"icon\": \"mdi:weather-sunny\",\n    \"temperature\": {{ $json.temperature }},\n    \"weather_condition\": \"{{ $json.weatherCondition }}\",\n    \"weather_description\": \"{{ $json.weatherDescription }}\",\n    \"commute_time\": {{ $json.commuteTimeMinutes }},\n    \"is_work_day\": {{ $json.isWorkDay }},\n    \"card_data\": {{ $json.cardData }},\n    \"last_updated\": \"{{ $json.timestamp }}\"\n  }\n}"
+            }
+          ]
+        }
+      },
+      "name": "Update Dashboard Entity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1400, 520]
+    }
+  ],
+  "connections": {
+    "Daily Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Determine Routine Phase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Routine Phase": {
+      "main": [
+        [
+          {
+            "node": "Should Execute?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Execute?": {
+      "true": [
+        [
+          {
+            "node": "Route By Phase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route By Phase": {
+      "pre-wakeup": [
+        [
+          {
+            "node": "Start Gradual Light",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "wakeup": [
+        [
+          {
+            "node": "Build Wake-up Sequence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "post-wakeup": [
+        [
+          {
+            "node": "Fetch Weather Data",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Traffic Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Wake-up Sequence": {
+      "main": [
+        [
+          {
+            "node": "Execute Actions in Parallel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Actions in Parallel": {
+      "main": [
+        [
+          {
+            "node": "Call Home Assistant Service",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Home Assistant Service": {
+      "main": [
+        [
+          {
+            "node": "Wait for Actions to Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Weather Data": {
+      "main": [
+        [
+          {
+            "node": "Create Morning Briefing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Traffic Data": {
+      "main": [
+        [
+          {
+            "node": "Prepare Dashboard Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Morning Briefing": {
+      "main": [
+        [
+          {
+            "node": "Announce Morning Briefing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Dashboard Data": {
+      "main": [
+        [
+          {
+            "node": "Update Dashboard Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": {
+    "global": {
+      "preferences": {
+        "weekdayWakeupTime": { "hour": 6, "minute": 30 },
+        "weekendWakeupTime": { "hour": 8, "minute": 0 },
+        "workDays": [1, 2, 3, 4, 5],
+        "gradualWakeup": true,
+        "gradualWakeupMinutes": 15,
+        "coffeeEnabled": true,
+        "weatherReport": true,
+        "trafficCheck": true,
+        "firstMeetingTime": "9:00 AM"
+      },
+      "userName": "John"
+    }
+  },
+  "tags": ["automation", "home", "morning-routine"],
+  "pinData": {}
+}

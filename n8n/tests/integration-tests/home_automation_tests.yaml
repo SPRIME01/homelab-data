@@ -1,0 +1,199 @@
+# Home Automation Workflows Integration Tests
+workflow_path: "home-automation"
+name: "Home Automation Integration Tests"
+
+# Test suites for each home automation workflow
+suites:
+  - workflow: "advanced-scenes"
+    name: "Advanced Scenes Tests"
+    requires_mocks: ["home_assistant"]
+    mocks:
+      home_assistant:
+        responses:
+          - url_contains: "api/services/light/turn_on"
+            method: "POST"
+            status: 200
+            body: {"result": "success"}
+          - url_contains: "api/services/media_player/play_media"
+            method: "POST"
+            status: 200
+            body: {"result": "success"}
+          - url_contains: "api/services/climate/set_temperature"
+            method: "POST"
+            status: 200
+            body: {"result": "success"}
+          - url_contains: "api/states"
+            method: "GET"
+            status: 200
+            body:
+              state: "on"
+              attributes:
+                friendly_name: "Living Room Light"
+    tests:
+      - name: "Movie Night Scene"
+        input:
+          scene: "movie_night"
+          room: "living_room"
+          options:
+            brightness: 30
+            temperature: 72
+        expected:
+          has_error: false
+          home_assistant_calls:
+            - service: "light.turn_on"
+              data:
+                entity_id: "light.living_room"
+                brightness_pct: 30
+            - service: "media_player.play_media"
+              data:
+                entity_id: "media_player.living_room_tv"
+            - service: "climate.set_temperature"
+              data:
+                entity_id: "climate.living_room"
+                temperature: 72
+
+      - name: "Morning Scene with Weather Check"
+        input:
+          scene: "morning"
+          room: "bedroom"
+          time: "07:00:00"
+        mock_config:
+          http:
+            - url_contains: "weather"
+              method: "GET"
+              response:
+                status: 200
+                body:
+                  current:
+                    temp: 55
+                    weather: [{"main": "Cloudy"}]
+        expected:
+          has_error: false
+          home_assistant_calls:
+            - service: "light.turn_on"
+              data:
+                entity_id: "light.bedroom"
+                brightness_pct: gte:50
+            - service: "cover.open_cover"
+              data:
+                entity_id: "cover.bedroom"
+
+  - workflow: "presence-detection"
+    name: "Presence Detection Tests"
+    requires_mocks: ["home_assistant"]
+    mocks:
+      home_assistant:
+        responses:
+          - url_contains: "api/services"
+            method: "POST"
+            status: 200
+            body: {"result": "success"}
+          - url_contains: "api/states/person.john"
+            method: "GET"
+            status: 200
+            body:
+              state: "home"
+              attributes:
+                friendly_name: "John"
+                source: "device_tracker.john_phone"
+          - url_contains: "api/states/device_tracker.john_phone"
+            method: "GET"
+            status: 200
+            body:
+              state: "home"
+              attributes:
+                source_type: "gps"
+                battery: 45
+    tests:
+      - name: "Person Arrives Home"
+        input:
+          event_type: "state_changed"
+          entity_id: "person.john"
+          from_state: "not_home"
+          to_state: "home"
+          event_context:
+            user_id: "user_123"
+        expected:
+          has_error: false
+          home_assistant_calls:
+            - service: contains("light.turn_on")
+            - service: contains("climate.turn_on")
+
+      - name: "Person Leaves Home"
+        input:
+          event_type: "state_changed"
+          entity_id: "person.john"
+          from_state: "home"
+          to_state: "not_home"
+          event_context:
+            user_id: "user_123"
+        expected:
+          has_error: false
+          home_assistant_calls:
+            - service: contains("light.turn_off")
+            - service: contains("climate.set_hvac_mode")
+              data:
+                hvac_mode: "eco"
+
+  - workflow: "adaptive-lighting"
+    name: "Adaptive Lighting Tests"
+    requires_mocks: ["home_assistant"]
+    mocks:
+      home_assistant:
+        responses:
+          - url_contains: "api/states/sun.sun"
+            method: "GET"
+            response:
+              status: 200
+              body:
+                state: "above_horizon"
+                attributes:
+                  elevation: 45
+                  next_dawn: "2023-01-02T06:30:00+00:00"
+                  next_dusk: "2023-01-01T17:30:00+00:00"
+          - url_contains: "api/services/light/turn_on"
+            method: "POST"
+            status: 200
+            body: {"result": "success"}
+    tests:
+      - name: "Daytime Adaptive Lighting"
+        input:
+          room: "living_room"
+          motion_detected: true
+          time: "12:00:00"
+          current_light_state: "off"
+        expected:
+          has_error: false
+          home_assistant_calls:
+            - service: "light.turn_on"
+              data:
+                entity_id: contains("living_room")
+                brightness_pct: gte:80
+                color_temp: contains
+                transition: contains
+
+      - name: "Evening Adaptive Lighting"
+        input:
+          room: "living_room"
+          motion_detected: true
+          time: "20:00:00"
+          current_light_state: "off"
+        mock_config:
+          home_assistant:
+            - url_contains: "api/states/sun.sun"
+              method: "GET"
+              response:
+                status: 200
+                body:
+                  state: "below_horizon"
+                  attributes:
+                    elevation: -20
+        expected:
+          has_error: false
+          home_assistant_calls:
+            - service: "light.turn_on"
+              data:
+                entity_id: contains("living_room")
+                brightness_pct: lte:50
+                color_temp: contains
+                transition: contains

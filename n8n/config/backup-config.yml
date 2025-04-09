@@ -1,0 +1,22 @@
+n8n:
+  api_url: "http://n8n.local:5678/api/v1"
+  api_key: "${N8N_API_KEY}"
+
+backup:
+  local_path: "/data/n8n/backups"
+  schedule:
+    time: "02:00"  # 2 AM daily
+
+storage:
+  type: "s3"  # or "local"
+  s3:
+    access_key: "${AWS_ACCESS_KEY}"
+    secret_key: "${AWS_SECRET_KEY}"
+    bucket: "homelab-backups"
+    endpoint_url: "https://minio.local"  # Optional, for S3-compatible storage
+  local:
+    path: "/mnt/backup-storage/n8n"
+
+retention:
+  days: 30
+  max_backups: 10

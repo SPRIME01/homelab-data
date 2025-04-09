@@ -1,0 +1,152 @@
+# Predictive Maintenance Workflow Integration Tests
+workflow: "predictive-maintenance"
+name: "Predictive Maintenance Integration Tests"
+
+# General test configuration
+config:
+  execution_timeout: 60  # Seconds
+  requires_mocks: ["triton_inference", "rabbitmq", "home_assistant"]
+
+# Mock configurations for this test set
+mocks:
+  triton_inference:
+    model_name: "temperature-anomaly-detection"
+    input_name: "temperature_data"
+    output_name: "anomaly_scores"
+    responses:
+      - input_contains: "temperature"
+        response: [0.1, 0.2, 0.8, 0.9, 0.3]  # Two anomalies (index 2,3)
+      - input_contains: "humidity"
+        response: [0.2, 0.3, 0.2, 0.1, 0.3]  # No anomalies
+      - input_contains: "power"
+        response: [0.1, 0.95, 0.94, 0.93, 0.1]  # Three anomalies (index 1,2,3)
+      - input_contains: "vibration"
+        response: [0.5, 0.5, 0.5, 0.5, 0.5]  # No anomalies
+
+  home_assistant:
+    responses:
+      - url_contains: "api/events/predictive_maintenance_alert"
+        method: "POST"
+        status: 200
+        body: {"result": "success"}
+      - default:
+          status: 200
+          body: {"result": "success"}
+
+  rabbitmq:
+    exchanges:
+      - name: "home-assistant-notifications"
+        type: "topic"
+        durable: true
+
+# Test cases
+tests:
+  - name: "Temperature Anomaly Detection"
+    input:
+      messages:
+        - content:
+            entity_id: "sensor.temperature_hvac"
+            device_type: "temperature"
+            state: "78.5"
+            attributes:
+              unit_of_measurement: "°F"
+              friendly_name: "HVAC Temperature"
+              device_class: "temperature"
+            timestamp: "2023-01-01T12:00:00Z"
+          properties:
+            headers:
+              data-type: "sensor"
+    expected:
+      has_error: false
+      deviceTypes: ["temperature"]
+      analysis:
+        anomalyCount: gt:0
+        severity: "warning"
+      rabbitmq_messages:
+        - exchange: "home-assistant-notifications"
+          routing_key: "maintenance.standard"
+          content_contains: "Maintenance recommended"
+
+  - name: "Power Consumption Critical Anomaly"
+    input:
+      messages:
+        - content:
+            entity_id: "sensor.power_consumption"
+            device_type: "power"
+            state: "1250"
+            attributes:
+              unit_of_measurement: "W"
+              friendly_name: "Power Consumption"
+              device_class: "power"
+            timestamp: "2023-01-01T12:00:00Z"
+          properties:
+            headers:
+              data-type: "sensor"
+    expected:
+      has_error: false
+      deviceTypes: ["power"]
+      analysis:
+        anomalyCount: gt:2
+        severity: "critical"
+      home_assistant_calls:
+        - event: "predictive_maintenance_alert"
+      rabbitmq_messages:
+        - exchange: "home-assistant-notifications"
+          routing_key: "maintenance.immediate"
+          content_contains: "URGENT"
+
+  - name: "No Anomalies in Humidity Data"
+    input:
+      messages:
+        - content:
+            entity_id: "sensor.humidity_bathroom"
+            device_type: "humidity"
+            state: "65"
+            attributes:
+              unit_of_measurement: "%"
+              friendly_name: "Bathroom Humidity"
+              device_class: "humidity"
+            timestamp: "2023-01-01T12:00:00Z"
+          properties:
+            headers:
+              data-type: "sensor"
+    expected:
+      has_error: false
+      deviceTypes: ["humidity"]
+      analysis:
+        anomalyCount: 0
+        severity: "normal"
+      home_assistant_calls: []
+      rabbitmq_messages: []
+
+  - name: "Mixed Sensor Data Processing"
+    input:
+      messages:
+        - content:
+            entity_id: "sensor.temperature_living_room"
+            device_type: "temperature"
+            state: "72.5"
+            attributes:
+              unit_of_measurement: "°F"
+              friendly_name: "Living Room Temperature"
+              device_class: "temperature"
+            timestamp: "2023-01-01T12:00:00Z"
+          properties:
+            headers:
+              data-type: "sensor"
+        - content:
+            entity_id: "sensor.humidity_living_room"
+            device_type: "humidity"
+            state: "45"
+            attributes:
+              unit_of_measurement: "%"
+              friendly_name: "Living Room Humidity"
+              device_class: "humidity"
+            timestamp: "2023-01-01T12:00:00Z"
+          properties:
+            headers:
+              data-type: "sensor"
+    expected:
+      has_error: false
+      deviceTypes: ["temperature", "humidity"]
+      dataPoints: 2

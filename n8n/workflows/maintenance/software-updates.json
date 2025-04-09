@@ -1,0 +1,200 @@
+{
+  "name": "Software Update Management",
+  "nodes": [
+    {
+      "parameters": {
+        "functionCode": "// Analyze custom application updates\nconst config = $input.item.json;\nconst response = $node['Check Custom App Version'].json;\n\nlet latestVersion = null;\n\n// Extract version based on app type\nif (config.type === 'api') {\n  if (config.versionJsonPath) {\n    // Extract from JSON path\n    const path = config.versionJsonPath.split('.');\n    let value = response;\n    for (const key of path) {\n      if (value && typeof value === 'object' && key in value) {\n        value = value[key];\n      }\n    }\n    latestVersion = value;\n  }\n}\n\n// Compare versions\nlet updateAvailable = false;\nif (latestVersion && config.currentVersion) {\n  // Clean versions for comparison\n  const current = config.currentVersion.replace(/^v/, '');\n  const latest = latestVersion.toString().replace(/^v/, '');\n  \n  // Compare versions\n  const currentParts = current.split('.').map(p => parseInt(p) || 0);\n  const latestParts = latest.split('.').map(p => parseInt(p) || 0);\n  \n  for (let i = 0; i < Math.max(currentParts.length, latestParts.length); i++) {\n    const currentPart = currentParts[i] || 0;\n    const latestPart = latestParts[i] || 0;\n    \n    if (latestPart > currentPart) {\n      updateAvailable = true;\n      break;\n    } else if (latestPart < currentPart) {\n      break;\n    }\n  }\n}\n\nreturn {\n  json: {\n    ...config,\n    latestVersion,\n    currentVersion: config.currentVersion,\n    updateAvailable,\n    checkedAt: new Date().toISOString()\n  }\n};"
+      },
+      "name": "Process Custom App Version",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1000, 900]
+    },
+    {
+      "parameters": {
+        "batchSize": 0,
+        "keepSource": true
+      },
+      "name": "Combine All Update Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1200, 600]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process all update results\nconst items = $input.all;\nconst updateSummary = {\n  docker: [],\n  github: [],\n  system: [],\n  custom: [],\n  timestamp: new Date().toISOString()\n};\n\n// Process each update check result\nitems.forEach(item => {\n  const result = item.json;\n  \n  if (result.type === 'docker') {\n    updateSummary.docker.push(result);\n  } else if (result.type === 'github') {\n    updateSummary.github.push(result);\n  } else if (result.type === 'system') {\n    updateSummary.system.push(result);\n  } else if (result.type === 'custom') {\n    updateSummary.custom.push(result);\n  }\n});\n\n// Count updates by type\nconst updateCounts = {\n  docker: updateSummary.docker.filter(r => r.updateAvailable).length,\n  github: updateSummary.github.filter(r => r.updateAvailable).length,\n  system: updateSummary.system.filter(r => r.updateAvailable).length,\n  custom: updateSummary.custom.filter(r => r.updateAvailable).length\n};\n\n// Generate update recommendations\nconst recommendations = [];\n\n// Docker updates\nif (updateCounts.docker > 0) {\n  const updates = updateSummary.docker.filter(r => r.updateAvailable);\n  updates.forEach(update => {\n    recommendations.push({\n      type: 'docker',\n      component: update.name,\n      currentVersion: update.currentTag,\n      newVersion: update.latestTag,\n      priority: update.updateDueToAge ? 'high' : 'medium',\n      action: 'update_docker_container'\n    });\n  });\n}\n\n// GitHub updates\nif (updateCounts.github > 0) {\n  const updates = updateSummary.github.filter(r => r.updateAvailable);\n  updates.forEach(update => {\n    recommendations.push({\n      type: 'github',\n      component: `${update.owner}/${update.repo}`,\n      currentVersion: update.currentVersion,\n      newVersion: update.latestVersion,\n      priority: 'medium',\n      action: 'update_github_component'\n    });\n  });\n}\n\n// System updates\nif (updateCounts.system > 0) {\n  const updates = updateSummary.system.filter(r => r.updateAvailable);\n  recommendations.push({\n    type: 'system',\n    component: 'system_packages',\n    updateCount: updateCounts.system,\n    securityUpdates: updates.filter(u => u.securityUpdate).length,\n    priority: updates.some(u => u.securityUpdate) ? 'high' : 'medium',\n    action: 'update_system_packages'\n  });\n}\n\n// Custom app updates\nif (updateCounts.custom > 0) {\n  const updates = updateSummary.custom.filter(r => r.updateAvailable);\n  updates.forEach(update => {\n    recommendations.push({\n      type: 'custom',\n      component: update.name,\n      currentVersion: update.currentVersion,\n      newVersion: update.latestVersion,\n      priority: 'medium',\n      action: 'update_custom_app'\n    });\n  });\n}\n\nreturn {\n  json: {\n    timestamp: new Date().toISOString(),\n    updateCounts,\n    totalUpdates: Object.values(updateCounts).reduce((a, b) => a + b, 0),\n    recommendations,\n    hasHighPriority: recommendations.some(r => r.priority === 'high'),\n    details: updateSummary\n  }\n};"
+      },
+      "name": "Generate Update Summary",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1400, 600]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://observability-stack.monitoring.svc.cluster.local:8086/api/v2/write?org=homelab&bucket=updates&precision=ns",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Token {{$env.INFLUXDB_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ \n// Format data for InfluxDB line protocol\nconst lines = [];\nconst ts = new Date($json.timestamp).getTime() * 1000000; // Convert to nanoseconds\n\n// Add update counts\nObject.entries($json.updateCounts).forEach(([type, count]) => {\n  lines.push(`updates,type=${type} count=${count} ${ts}`);\n});\n\n// Add high priority flag\nlines.push(`updates,type=summary high_priority=${$json.hasHighPriority ? 1 : 0},total=${$json.totalUpdates} ${ts}`);\n\n// Add component details\n$json.recommendations.forEach(rec => {\n  lines.push(`component_updates,type=${rec.type},component=${rec.component.replace(/\\s+/g, '\\\\ ')} priority=\"${rec.priority}\" ${ts}`);\n});\n\nreturn lines.join('\\n');\n}}"
+            }
+          ]
+        }
+      },
+      "name": "Log to InfluxDB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1600, 500]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/states/sensor.software_updates",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"state\": \"{{ $json.totalUpdates }}\",\n  \"attributes\": {\n    \"friendly_name\": \"Available Software Updates\",\n    \"icon\": \"{{ $json.totalUpdates > 0 ? ($json.hasHighPriority ? 'mdi:alert-decagram' : 'mdi:package-up') : 'mdi:package-check' }}\",\n    \"update_counts\": {{ JSON.stringify($json.updateCounts) }},\n    \"has_high_priority\": {{ $json.hasHighPriority }},\n    \"recommendations\": {{ JSON.stringify($json.recommendations) }},\n    \"last_checked\": \"{{ $json.timestamp }}\"\n  }\n}"
+            }
+          ]
+        }
+      },
+      "name": "Update Home Assistant Entity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1600, 700]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.totalUpdates }}",
+              "value2": 0,
+              "operation": "notEqual"
+            }
+          ]
+        }
+      },
+      "name": "Updates Available?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1800, 600]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "homelab-notifications",
+        "routingKey": "system.updates",
+        "content": "={{ JSON.stringify({\n  \"title\": `Software Updates Available ${$json.hasHighPriority ? '(High Priority)' : ''}\",\n  \"message\": `${$json.totalUpdates} updates available across ${Object.entries($json.updateCounts).filter(([_, count]) => count > 0).length} components`,\n  \"severity\": $json.hasHighPriority ? \"high\" : \"info\",\n  \"component\": \"update-checker\",\n  \"details\": {\n    \"timestamp\": $json.timestamp,\n    \"update_counts\": $json.updateCounts,\n    \"recommendations\": $json.recommendations\n  },\n  \"actions\": $json.recommendations.map(r => r.action)\n}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true,
+          "headers": {
+            "header": [
+              {
+                "name": "notification-type",
+                "value": "={{ $json.hasHighPriority ? 'urgent' : 'standard' }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Update Notification",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [2000, 600],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Process Custom App Version": {
+      "main": [
+        [
+          {
+            "node": "Combine All Update Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine All Update Results": {
+      "main": [
+        [
+          {
+            "node": "Generate Update Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Update Summary": {
+      "main": [
+        [
+          {
+            "node": "Log to InfluxDB",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Update Home Assistant Entity",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Updates Available?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Updates Available?": {
+      "true": [
+        [
+          {
+            "node": "Send Update Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

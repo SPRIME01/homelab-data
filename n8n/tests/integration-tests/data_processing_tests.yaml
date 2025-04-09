@@ -1,0 +1,193 @@
+# Data Processing Workflows Integration Tests
+workflow_path: "data-processing"
+name: "Data Processing Integration Tests"
+
+# Test suites for each data processing workflow
+suites:
+  - workflow: "data-transformation"
+    name: "Data Transformation Tests"
+    tests:
+      - name: "JSON to CSV Transformation"
+        input:
+          data:
+            - name: "John Doe"
+              age: 30
+              email: "john@example.com"
+            - name: "Jane Smith"
+              age: 28
+              email: "jane@example.com"
+          format: "json"
+          targetFormat: "csv"
+        expected:
+          has_error: false
+          contentType: "text/csv"
+          result_contains: "name,age,email"
+          result_contains: "John Doe,30,john@example.com"
+          result_contains: "Jane Smith,28,jane@example.com"
+
+      - name: "XML to JSON Transformation"
+        input:
+          data: |
+            <users>
+              <user>
+                <name>John Doe</name>
+                <age>30</age>
+                <email>john@example.com</email>
+              </user>
+              <user>
+                <name>Jane Smith</name>
+                <age>28</age>
+                <email>jane@example.com</email>
+              </user>
+            </users>
+          format: "xml"
+          targetFormat: "json"
+        expected:
+          has_error: false
+          contentType: "application/json"
+          json:
+            users:
+              user:
+                - name: "John Doe"
+                  age: "30"
+                  email: "john@example.com"
+                - name: "Jane Smith"
+                  age: "28"
+                  email: "jane@example.com"
+
+      - name: "Invalid Format Handling"
+        input:
+          data: "This is just plain text"
+          format: "invalid_format"
+          targetFormat: "json"
+        expected:
+          has_error: true
+          error_contains: "Unsupported format"
+
+  - workflow: "data-enrichment"
+    name: "Data Enrichment Tests"
+    tests:
+      - name: "Enrich User Data with Weather"
+        input:
+          user:
+            name: "John Doe"
+            location: "New York"
+          enrichWith: ["weather"]
+        mock_config:
+          http:
+            - url_contains: "weather"
+              method: "GET"
+              response:
+                status: 200
+                body:
+                  temperature: 72
+                  conditions: "Sunny"
+                  humidity: 45
+        expected:
+          has_error: false
+          json:
+            name: "John Doe"
+            location: "New York"
+            weather:
+              temperature: 72
+              conditions: "Sunny"
+              humidity: 45
+
+      - name: "Enrich Product with Reviews"
+        input:
+          product:
+            id: "12345"
+            name: "Smart Speaker"
+          enrichWith: ["reviews"]
+        mock_config:
+          http:
+            - url_contains: "reviews"
+              method: "GET"
+              response:
+                status: 200
+                body:
+                  reviews:
+                    - rating: 5
+                      comment: "Great product!"
+                    - rating: 4
+                      comment: "Works well"
+        expected:
+          has_error: false
+          json:
+            id: "12345"
+            name: "Smart Speaker"
+            reviews:
+              - rating: 5
+                comment: "Great product!"
+              - rating: 4
+                comment: "Works well"
+            review_average: 4.5
+
+      - name: "Error During Enrichment"
+        input:
+          user:
+            name: "Error Test"
+            location: "Error City"
+          enrichWith: ["weather"]
+        mock_config:
+          http:
+            - url_contains: "weather"
+              method: "GET"
+              response:
+                status: 500
+                body: "Internal Server Error"
+        expected:
+          has_error: true
+          json:
+            name: "Error Test"
+            location: "Error City"
+            enrichment_error: contains("Failed to fetch weather data")
+
+  - workflow: "data-filtering"
+    name: "Data Filtering Tests"
+    tests:
+      - name: "Filter Sensor Data by Threshold"
+        input:
+          sensors:
+            - id: "temp1"
+              value: 75
+              type: "temperature"
+            - id: "temp2"
+              value: 68
+              type: "temperature"
+            - id: "hum1"
+              value: 50
+              type: "humidity"
+          filter:
+            field: "value"
+            operator: "gt"
+            threshold: 70
+        expected:
+          has_error: false
+          filtered_count: 1
+          match_ids: ["temp1"]
+
+      - name: "Filter by Multiple Criteria"
+        input:
+          sensors:
+            - id: "temp1"
+              value: 75
+              type: "temperature"
+            - id: "temp2"
+              value: 68
+              type: "temperature"
+            - id: "hum1"
+              value: 50
+              type: "humidity"
+          filter:
+            criteria:
+              - field: "type"
+                operator: "equals"
+                value: "temperature"
+              - field: "value"
+                operator: "lt"
+                value: 70
+        expected:
+          has_error: false
+          filtered_count: 1
+          match_ids: ["temp2"]

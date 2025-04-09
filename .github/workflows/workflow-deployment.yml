@@ -1,0 +1,208 @@
+name: n8n Workflow Deployment
+
+on:
+  push:
+    paths:
+      - 'homelab-data/n8n/workflows/**'
+      - 'homelab-data/n8n/custom-nodes/**'
+    branches: [ main, staging ]
+  pull_request:
+    paths:
+      - 'homelab-data/n8n/workflows/**'
+      - 'homelab-data/n8n/custom-nodes/**'
+    branches: [ main, staging ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (staging/production)'
+        required: true
+        default: 'staging'
+      workflows:
+        description: 'Specific workflows to deploy (comma-separated)'
+        required: false
+
+env:
+  N8N_STAGING_URL: ${{ secrets.N8N_STAGING_URL }}
+  N8N_PRODUCTION_URL: ${{ secrets.N8N_PRODUCTION_URL }}
+  N8N_API_KEY: ${{ secrets.N8N_API_KEY }}
+  SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+  ZENML_SERVER_URL: ${{ secrets.ZENML_SERVER_URL }}
+  ZENML_API_KEY: ${{ secrets.ZENML_API_KEY }}
+
+jobs:
+  validate:
+    name: Validate Workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install n8n CLI
+        run: npm install -g n8n
+
+      - name: Install Dependencies
+        run: |
+          npm install ajv
+          npm install js-yaml
+
+      - name: Validate Workflow JSON
+        run: |
+          python3 scripts/validate_workflows.py homelab-data/n8n/workflows/
+
+      - name: Check Workflow Dependencies
+        run: |
+          python3 scripts/check_dependencies.py homelab-data/n8n/workflows/
+
+      - name: Validate Custom Nodes
+        if: hashFiles('homelab-data/n8n/custom-nodes/**') != ''
+        run: |
+          cd homelab-data/n8n/custom-nodes
+          for d in */ ; do
+            cd "$d"
+            npm install
+            npm run build
+            npm test
+            cd ..
+          done
+
+  security-scan:
+    name: Security Scan
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run Security Scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+      - name: Check for Secrets
+        uses: zricethezav/gitleaks-action@master
+
+  test-staging:
+    name: Test in Staging
+    needs: security-scan
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    environment: staging
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Deploy to Staging
+        run: python3 scripts/deploy_workflows.py --environment staging
+        env:
+          N8N_URL: ${{ env.N8N_STAGING_URL }}
+          N8N_API_KEY: ${{ secrets.N8N_STAGING_API_KEY }}
+
+      - name: Run Integration Tests
+        run: python3 scripts/test_workflows.py --environment staging
+        env:
+          N8N_URL: ${{ env.N8N_STAGING_URL }}
+          N8N_API_KEY: ${{ secrets.N8N_STAGING_API_KEY }}
+
+      - name: Verify Webhook Endpoints
+        run: python3 scripts/verify_webhooks.py --environment staging
+
+      - name: Test Workflow Connections
+        run: python3 scripts/test_connections.py --environment staging
+
+  deploy-production:
+    name: Deploy to Production
+    needs: test-staging
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    environment: production
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Backup Current State
+        run: python3 scripts/backup_workflows.py
+        env:
+          N8N_URL: ${{ env.N8N_PRODUCTION_URL }}
+          N8N_API_KEY: ${{ secrets.N8N_PRODUCTION_API_KEY }}
+
+      - name: Deploy to Production
+        run: |
+          python3 scripts/deploy_workflows.py --environment production
+          echo "DEPLOY_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
+        env:
+          N8N_URL: ${{ env.N8N_PRODUCTION_URL }}
+          N8N_API_KEY: ${{ secrets.N8N_PRODUCTION_API_KEY }}
+
+      - name: Verify Deployment
+        run: python3 scripts/verify_deployment.py --environment production
+        env:
+          N8N_URL: ${{ env.N8N_PRODUCTION_URL }}
+          N8N_API_KEY: ${{ secrets.N8N_PRODUCTION_API_KEY }}
+
+      - name: Update ZenML Pipeline Status
+        if: env.ZENML_SERVER_URL != ''
+        run: |
+          python3 scripts/update_zenml_status.py \
+            --pipeline "n8n-workflow-deployment" \
+            --status "completed" \
+            --artifacts "workflows=${GITHUB_SHA}"
+
+      - name: Create Deployment Tag
+        run: |
+          git tag "deployment-$(date -u +'%Y%m%d-%H%M%S')" $GITHUB_SHA
+          git push origin --tags
+
+  post-deployment:
+    name: Post-Deployment Tasks
+    needs: deploy-production
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Notify Slack
+        if: env.SLACK_WEBHOOK != ''
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,message,commit,author,action,workflow
+          text: |
+            Deployment ${{ job.status }}
+            Environment: ${{ github.event.inputs.environment || 'production' }}
+            Commit: ${{ github.sha }}
+            Deploy time: ${{ env.DEPLOY_TIME }}
+
+      - name: Update Documentation
+        if: success()
+        run: |
+          python3 scripts/update_workflow_docs.py \
+            --workflows "homelab-data/n8n/workflows/" \
+            --output "homelab-data/docs/workflows/"
+
+  rollback:
+    name: Rollback
+    needs: deploy-production
+    runs-on: ubuntu-latest
+    if: failure()
+    environment: production
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Restore from Backup
+        run: python3 scripts/restore_workflows.py --environment production
+        env:
+          N8N_URL: ${{ env.N8N_PRODUCTION_URL }}
+          N8N_API_KEY: ${{ secrets.N8N_PRODUCTION_API_KEY }}
+
+      - name: Notify Rollback
+        if: env.SLACK_WEBHOOK != ''
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          fields: repo,message,commit,author,action,workflow
+          text: |
+            ⚠️ Deployment failed - Rollback completed
+            Environment: ${{ github.event.inputs.environment || 'production' }}
+            Commit: ${{ github.sha }}

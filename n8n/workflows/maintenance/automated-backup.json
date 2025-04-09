@@ -1,0 +1,469 @@
+{
+  "name": "Automated Backup Procedure",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 12
+            }
+          ]
+        }
+      },
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Configure backup settings and prepare execution\nconst backupSettings = {\n  components: [\n    {\n      name: \"homeassistant\",\n      type: \"docker\",\n      containerId: \"homeassistant\",\n      backupPath: \"/backup/homeassistant\",\n      retention: {\n        days: 30,\n        minBackups: 5,\n        maxBackups: 10\n      }\n    },\n    {\n      name: \"n8n\",\n      type: \"postgresql\",\n      database: \"n8n\",\n      backupPath: \"/backup/n8n\",\n      retention: {\n        days: 14,\n        minBackups: 3,\n        maxBackups: 7\n      }\n    },\n    {\n      name: \"metrics\",\n      type: \"influxdb\",\n      bucket: \"metrics\",\n      backupPath: \"/backup/influxdb\",\n      retention: {\n        days: 7,\n        minBackups: 2,\n        maxBackups: 5\n      }\n    },\n    {\n      name: \"documents\",\n      type: \"filesystem\",\n      sourcePath: \"/data/documents\",\n      backupPath: \"/backup/documents\",\n      retention: {\n        days: 90,\n        minBackups: 10,\n        maxBackups: 20\n      }\n    }\n  ],\n  backupRoot: \"/backup\",\n  offsite: {\n    enabled: true,\n    provider: \"s3\",\n    bucket: \"homelab-backups\",\n    prefix: \"automated/\",\n    credentials: {\n      accessKeyVar: \"S3_ACCESS_KEY\",\n      secretKeyVar: \"S3_SECRET_KEY\"\n    }\n  },\n  notification: {\n    onSuccess: true,\n    onFailure: true\n  }\n};\n\n// Calculate dates for rotation and naming\nconst now = new Date();\nconst timestamp = now.toISOString().replace(/[:.]/g, '-');\nconst backupDate = now.toISOString().split('T')[0];\n\n// Prepare backup items\nconst backupItems = backupSettings.components.map(component => ({\n  name: component.name,\n  type: component.type,\n  backupFileName: `${component.name}_${timestamp}.backup`,\n  backupPath: component.backupPath,\n  backupFullPath: `${component.backupPath}/${component.name}_${timestamp}.backup`,\n  retention: component.retention,\n  ...component\n}));\n\nreturn {\n  json: {\n    timestamp,\n    backupDate,\n    backupRoot: backupSettings.backupRoot,\n    offsite: backupSettings.offsite,\n    notification: backupSettings.notification,\n    backupItems,\n    status: 'initialized'\n  }\n};"
+      },
+      "name": "Prepare Backup Settings",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "options": {},
+        "items": "={{ $json.backupItems }}"
+      },
+      "name": "Process Each Backup Item",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "mode": "chooseBranch",
+        "output": "={{ $json.type }}"
+      },
+      "name": "Select Backup Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [800, 300]
+    },
+    {
+      "parameters": {
+        "command": "=docker exec {{ $json.containerId }} tar -czf - /config | cat > {{ $json.backupFullPath }}",
+        "executeDirectly": false
+      },
+      "name": "Backup Docker Container",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1000, 100]
+    },
+    {
+      "parameters": {
+        "command": "=pg_dump -U postgres -d {{ $json.database }} | gzip > {{ $json.backupFullPath }}",
+        "executeDirectly": false
+      },
+      "name": "Backup PostgreSQL",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1000, 300]
+    },
+    {
+      "parameters": {
+        "command": "=influx backup -t $INFLUX_TOKEN {{ $json.backupFullPath }} --bucket {{ $json.bucket }}",
+        "executeDirectly": false
+      },
+      "name": "Backup InfluxDB",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1000, 500]
+    },
+    {
+      "parameters": {
+        "command": "=tar -czf {{ $json.backupFullPath }} -C {{ $json.sourcePath }} .",
+        "executeDirectly": false
+      },
+      "name": "Backup Filesystem",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1000, 700]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Update item with backup status\nconst lastExitCode = $node.Backup_Docker_Container?.outputItems?.[0]?.json?.exitCode ||\n  $node.Backup_PostgreSQL?.outputItems?.[0]?.json?.exitCode ||\n  $node.Backup_InfluxDB?.outputItems?.[0]?.json?.exitCode ||\n  $node.Backup_Filesystem?.outputItems?.[0]?.json?.exitCode;\n\nconst lastStdErr = $node.Backup_Docker_Container?.outputItems?.[0]?.json?.stderr ||\n  $node.Backup_PostgreSQL?.outputItems?.[0]?.json?.stderr ||\n  $node.Backup_InfluxDB?.outputItems?.[0]?.json?.stderr ||\n  $node.Backup_Filesystem?.outputItems?.[0]?.json?.stderr || '';\n\nconst success = lastExitCode === 0;\n\n// Get file size\nlet fileSize = 0;\nlet backupTimestamp = new Date().toISOString();\n\nif (success) {\n  try {\n    // This is a placeholder - in a real workflow, you would use appropriate command to get file size\n    fileSize = Math.floor(Math.random() * 100000000); // Simulate random file size for demo\n  } catch (error) {\n    console.log('Error getting file size:', error);\n  }\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    backupStatus: success ? 'success' : 'failed',\n    backupTimestamp,\n    fileSize,\n    error: success ? null : lastStdErr,\n    exitCode: lastExitCode\n  }\n};"
+      },
+      "name": "Process Backup Result",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 0,
+        "keepSource": true
+      },
+      "name": "Combine Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1400, 300]
+    },
+    {
+      "parameters": {
+        "command": "=find {{ $json.backupRoot }} -name \"{{ $json.name }}_*.backup\" -type f -mtime +{{ $json.retention.days }} -delete",
+        "executeDirectly": false
+      },
+      "name": "Clean Old Backups",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1600, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.offsite.enabled }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Offsite Backup Enabled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1800, 300]
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "options": {},
+        "items": "={{ $json.backupItems.filter(item => item.backupStatus === 'success') }}"
+      },
+      "name": "Process Successful Backups",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://minio-api.storage-system.svc.cluster.local/upload",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "={{ $env.MINIO_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"bucket\": \"{{ $json.offsite.bucket }}\",\n  \"key\": \"{{ $json.offsite.prefix }}{{ $json.name }}/{{ $json.backupFileName }}\",\n  \"filePath\": \"{{ $json.backupFullPath }}\"\n}",
+        "options": {}
+      },
+      "name": "Upload to S3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2200, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://observability-stack.monitoring.svc.cluster.local:8086/api/v2/write?org=homelab&bucket=backups&precision=ns",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Token {{ $env.INFLUXDB_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ \n// Format data for InfluxDB line protocol\nconst items = $json.backupItems;\nconst lines = [];\nconst timestamp = Date.now() * 1000000; // Convert to nanoseconds\n\n// Add one line per component\nitems.forEach(item => {\n  const status = item.backupStatus === 'success' ? 1 : 0;\n  const tags = `component=${item.name},type=${item.type}`;\n  const fields = `success=${status},size=${item.fileSize || 0}`;\n  lines.push(`backup,${tags} ${fields} ${timestamp}`);\n});\n\n// Add summary line\nconst successCount = items.filter(i => i.backupStatus === 'success').length;\nconst totalSize = items.reduce((sum, item) => sum + (item.fileSize || 0), 0);\nlines.push(`backup_summary,source=automated total=${items.length},success=${successCount},size=${totalSize} ${timestamp}`);\n\nreturn lines.join('\\n');\n}}"
+            }
+          ]
+        }
+      },
+      "name": "Log to InfluxDB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2200, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.notification.onSuccess }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Notify on Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2400, 300]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "homelab-notifications",
+        "routingKey": "system.backup",
+        "content": "={{ JSON.stringify({\n  \"title\": \"Backup Completed\",\n  \"message\": `Automated backup completed with ${$json.backupItems.filter(i => i.backupStatus === 'success').length}/${$json.backupItems.length} components successful`,\n  \"severity\": \"info\",\n  \"component\": \"backup-system\",\n  \"details\": {\n    \"timestamp\": $json.timestamp,\n    \"components\": $json.backupItems.map(i => ({ name: i.name, status: i.backupStatus }))\n  },\n  \"actions\": [\n    { \"name\": \"View Details\", \"url\": \"/admin/backups\" }\n  ]\n}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true
+        }
+      },
+      "name": "Send Success Notification",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [2600, 200],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare Backup Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Backup Settings": {
+      "main": [
+        [
+          {
+            "node": "Process Each Backup Item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Each Backup Item": {
+      "main": [
+        [
+          {
+            "node": "Select Backup Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Backup Type": {
+      "docker": [
+        [
+          {
+            "node": "Backup Docker Container",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "postgresql": [
+        [
+          {
+            "node": "Backup PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "influxdb": [
+        [
+          {
+            "node": "Backup InfluxDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "filesystem": [
+        [
+          {
+            "node": "Backup Filesystem",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backup Docker Container": {
+      "main": [
+        [
+          {
+            "node": "Process Backup Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backup PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": "Process Backup Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backup InfluxDB": {
+      "main": [
+        [
+          {
+            "node": "Process Backup Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backup Filesystem": {
+      "main": [
+        [
+          {
+            "node": "Process Backup Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Backup Result": {
+      "main": [
+        [
+          {
+            "node": "Combine Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Results": {
+      "main": [
+        [
+          {
+            "node": "Clean Old Backups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean Old Backups": {
+      "main": [
+        [
+          {
+            "node": "Offsite Backup Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Offsite Backup Enabled?": {
+      "true": [
+        [
+          {
+            "node": "Process Successful Backups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Log to InfluxDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Successful Backups": {
+      "main": [
+        [
+          {
+            "node": "Upload to S3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to S3": {
+      "main": [
+        [
+          {
+            "node": "Log to InfluxDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to InfluxDB": {
+      "main": [
+        [
+          {
+            "node": "Notify on Success?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify on Success?": {
+      "true": [
+        [
+          {
+            "node": "Send Success Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": {},
+  "tags": ["maintenance", "backup", "automated"],
+  "pinData": {}
+}

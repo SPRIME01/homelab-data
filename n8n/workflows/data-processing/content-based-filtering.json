@@ -1,0 +1,219 @@
+{
+  "name": "Content-Based Filtering",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "consume",
+        "queue": "data-processing-filter",
+        "options": {
+          "contentType": "application/json"
+        }
+      },
+      "name": "RabbitMQ Input",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract message properties\nconst message = $input.item.json.messages[0];\nconst content = typeof message.content === 'string' ? JSON.parse(message.content) : message.content;\n\n// Extract filtering parameters\nconst data = content.data || {};\nconst filters = content.filters || [];\nconst options = content.options || {};\n\nreturn {\n  json: {\n    data,\n    filters,\n    options,\n    timestamp: new Date().toISOString(),\n    messageId: message.properties?.messageId || `msg-${Date.now()}`,\n    matched: false,  // Will be set to true if any filter matches\n    matches: [],     // Will contain all matched filter names\n    matchDetails: {} // Will contain details about why each filter matched\n  }\n};"
+      },
+      "name": "Extract Message Properties",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Apply all filters to the data\nconst data = $input.item.json.data;\nconst filters = $input.item.json.filters;\nconst options = $input.item.json.options;\n\n// Function to evaluate a condition against the data\nfunction evaluateCondition(condition, data) {\n  // Simple path-based accessor for nested properties\n  function getPropertyValue(obj, path) {\n    return path.split('.').reduce((o, i) => o ? o[i] : undefined, obj);\n  }\n  \n  const { field, operator, value } = condition;\n  const fieldValue = getPropertyValue(data, field);\n  \n  // Handle case where field doesn't exist\n  if (fieldValue === undefined) {\n    return operator === 'null' || operator === 'notExists';\n  }\n  \n  switch(operator) {\n    case 'equals':\n      return fieldValue === value;\n    case 'notEquals':\n      return fieldValue !== value;\n    case 'contains':\n      return String(fieldValue).includes(String(value));\n    case 'notContains':\n      return !String(fieldValue).includes(String(value));\n    case 'greaterThan':\n      return Number(fieldValue) > Number(value);\n    case 'lessThan':\n      return Number(fieldValue) < Number(value);\n    case 'greaterOrEqual':\n      return Number(fieldValue) >= Number(value);\n    case 'lessOrEqual':\n      return Number(fieldValue) <= Number(value);\n    case 'in':\n      return Array.isArray(value) && value.includes(fieldValue);\n    case 'notIn':\n      return Array.isArray(value) && !value.includes(fieldValue);\n    case 'exists':\n      return true; // Field exists if we got this far\n    case 'notExists':\n      return false; // Field exists if we got this far\n    case 'null':\n      return fieldValue === null;\n    case 'notNull':\n      return fieldValue !== null;\n    case 'empty':\n      return fieldValue === '' || (Array.isArray(fieldValue) && fieldValue.length === 0) || (typeof fieldValue === 'object' && Object.keys(fieldValue).length === 0);\n    case 'notEmpty':\n      return fieldValue !== '' && (!Array.isArray(fieldValue) || fieldValue.length > 0) && (typeof fieldValue !== 'object' || Object.keys(fieldValue).length > 0);\n    case 'matchRegExp':\n      return new RegExp(value).test(String(fieldValue));\n    default:\n      return false;\n  }\n}\n\n// Evaluate a filter which may have multiple conditions\nfunction evaluateFilter(filter, data) {\n  // Handle single condition case\n  if (filter.condition) {\n    return evaluateCondition(filter.condition, data);\n  }\n  \n  // Handle multiple conditions with AND/OR logic\n  if (filter.conditions && Array.isArray(filter.conditions)) {\n    if (filter.operator === 'OR') {\n      return filter.conditions.some(condition => evaluateCondition(condition, data));\n    } else { // default to AND\n      return filter.conditions.every(condition => evaluateCondition(condition, data));\n    }\n  }\n  \n  return false;\n}\n\n// Apply all filters\nconst matchedFilters = [];\nconst matchDetails = {};\n\nfilters.forEach(filter => {\n  if (!filter.name) {\n    filter.name = `filter_${matchedFilters.length}`;\n  }\n  \n  const matched = evaluateFilter(filter, data);\n  if (matched) {\n    matchedFilters.push(filter.name);\n    matchDetails[filter.name] = {\n      matched: true,\n      timestamp: new Date().toISOString(),\n      priority: filter.priority || 0,\n      description: filter.description || ''\n    };\n  }\n});\n\n// Return matched filters\nreturn {\n  json: {\n    ...$input.item.json,\n    matched: matchedFilters.length > 0,\n    matches: matchedFilters,\n    matchDetails\n  }\n};"
+      },
+      "name": "Apply Filters",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.matched }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Any Matches?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [780, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare matched data\nconst data = $input.item.json.data;\nconst matches = $input.item.json.matches;\nconst matchDetails = $input.item.json.matchDetails;\n\n// Get highest priority match\nlet highestPriority = -Infinity;\nlet highestPriorityMatch = null;\n\nmatches.forEach(matchName => {\n  const priority = matchDetails[matchName]?.priority || 0;\n  if (priority > highestPriority) {\n    highestPriority = priority;\n    highestPriorityMatch = matchName;\n  }\n});\n\n// Format output for routing\nreturn {\n  json: {\n    ...$input.item.json,\n    highestPriorityMatch,\n    output: {\n      data: $input.item.json.data,\n      matches: $input.item.json.matches,\n      timestamp: new Date().toISOString(),\n      messageId: $input.item.json.messageId,\n    }\n  }\n};"
+      },
+      "name": "Prepare Matched Output",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [960, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare unmatched data\nconst data = $input.item.json.data;\n\n// Format output\nreturn {\n  json: {\n    ...$input.item.json,\n    output: {\n      data: $input.item.json.data,\n      reason: 'No filters matched',\n      timestamp: new Date().toISOString(),\n      messageId: $input.item.json.messageId,\n    }\n  }\n};"
+      },
+      "name": "Prepare Unmatched Output",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [960, 400]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "data-processing-results",
+        "routingKey": "filter.matched",
+        "content": "={{ JSON.stringify($json.output) }}",
+        "options": {
+          "persistent": true,
+          "contentType": "application/json",
+          "headers": {
+            "header": [
+              {
+                "name": "filter-matches",
+                "value": "={{ $json.matches.join(',') }}"
+              },
+              {
+                "name": "highest-priority-match",
+                "value": "={{ $json.highestPriorityMatch }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Matched Result",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [1140, 200],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "data-processing-results",
+        "routingKey": "filter.unmatched",
+        "content": "={{ JSON.stringify($json.output) }}",
+        "options": {
+          "persistent": true,
+          "contentType": "application/json"
+        }
+      },
+      "name": "Send Unmatched Result",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [1140, 400],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "RabbitMQ Input": {
+      "main": [
+        [
+          {
+            "node": "Extract Message Properties",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Message Properties": {
+      "main": [
+        [
+          {
+            "node": "Apply Filters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Filters": {
+      "main": [
+        [
+          {
+            "node": "Any Matches?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Matches?": {
+      "true": [
+        [
+          {
+            "node": "Prepare Matched Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Prepare Unmatched Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Matched Output": {
+      "main": [
+        [
+          {
+            "node": "Send Matched Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Unmatched Output": {
+      "main": [
+        [
+          {
+            "node": "Send Unmatched Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": null,
+  "tags": ["data-processing", "filtering"],
+  "pinData": {}
+}

@@ -1,0 +1,436 @@
+{
+  "name": "Data Enrichment",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "consume",
+        "queue": "data-processing-enrich",
+        "options": {
+          "contentType": "application/json"
+        }
+      },
+      "name": "RabbitMQ Input",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract message properties\nconst message = $input.item.json.messages[0];\nconst content = typeof message.content === 'string' ? JSON.parse(message.content) : message.content;\n\n// Extract enrichment parameters\nconst data = content.data || {};\nconst enrichmentSources = content.enrichmentSources || [];\nconst options = content.options || {};\n\nreturn {\n  json: {\n    data,\n    enrichmentSources,\n    options,\n    timestamp: new Date().toISOString(),\n    messageId: message.properties?.messageId || `msg-${Date.now()}`,\n    originalData: data,  // Keep a copy of original data\n    enrichedData: JSON.parse(JSON.stringify(data)),  // Create a copy for enrichment\n    enrichmentStatus: {},\n    entityIds: content.entityIds || []  // Optional entity IDs for Home Assistant\n  }\n};"
+      },
+      "name": "Extract Message Properties",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": [
+            {
+              "condition": "={{ $json.enrichmentSources.includes(\"weather\") }}",
+              "value": "weather"
+            },
+            {
+              "condition": "={{ $json.enrichmentSources.includes(\"location\") }}",
+              "value": "location"
+            },
+            {
+              "condition": "={{ $json.enrichmentSources.includes(\"homeassistant\") }}",
+              "value": "homeassistant"
+            },
+            {
+              "condition": "={{ $json.enrichmentSources.includes(\"device\") }}",
+              "value": "device"
+            },
+            {
+              "condition": "={{ $json.enrichmentSources.includes(\"custom\") }}",
+              "value": "custom"
+            }
+          ]
+        },
+        "combineOperation": "multiplex"
+      },
+      "name": "Determine Enrichment Sources",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.openweathermap.org/data/2.5/weather?lat={{ $json.options.location?.lat || $json.data.latitude || \"0\" }}&lon={{ $json.options.location?.lon || $json.data.longitude || \"0\" }}&appid={{ $env.OPENWEATHERMAP_API_KEY }}&units={{ $json.options.units || \"metric\" }}",
+        "options": {
+          "responseFormat": "json"
+        }
+      },
+      "name": "Weather Enrichment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [840, 100]
+    },
+    {
+      "parameters": {
+        "url": "=https://nominatim.openstreetmap.org/reverse?lat={{ $json.data.latitude || $json.options.location?.lat || \"0\" }}&lon={{ $json.data.longitude || $json.options.location?.lon || \"0\" }}&format=json&addressdetails=1",
+        "options": {
+          "responseFormat": "json"
+        }
+      },
+      "name": "Location Enrichment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [840, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "headerAuth",
+        "url": "=http://homeassistant.local:8123/api/states/{{ $json.entityIds.join(\",\") }}",
+        "options": {
+          "responseFormat": "json"
+        }
+      },
+      "name": "Home Assistant Enrichment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [840, 500],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1",
+          "name": "Home Assistant API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Add device data\nconst data = $input.item.json.enrichedData;\nconst options = $input.item.json.options;\n\n// Add basic device information\nconst deviceInfo = {\n  hostname: options.device?.hostname || os.hostname(),\n  platform: os.platform(),\n  arch: os.arch(),\n  cpus: os.cpus().length,\n  memory: {\n    total: os.totalmem(),\n    free: os.freemem()\n  },\n  uptime: os.uptime(),\n  loadavg: os.loadavg(),\n  network: options.device?.network || \"unknown\"\n};\n\n// Return enriched data\nreturn {\n  json: {\n    ...$input.item.json,\n    enrichedData: {\n      ...$input.item.json.enrichedData,\n      device: deviceInfo\n    },\n    enrichmentStatus: {\n      ...$input.item.json.enrichmentStatus,\n      device: true\n    }\n  }\n};"
+      },
+      "name": "Device Enrichment",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [840, 700]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.options.customEnrichment?.url || $json.data.enrichmentUrl }}",
+        "authentication": "genericCredentialType",
+        "method": "POST",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "data",
+              "value": "={{ JSON.stringify($json.data) }}"
+            },
+            {
+              "name": "options",
+              "value": "={{ JSON.stringify($json.options.customEnrichment || {}) }}"
+            }
+          ]
+        },
+        "options": {
+          "responseFormat": "json"
+        }
+      },
+      "name": "Custom Enrichment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [840, 900],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2",
+          "name": "Custom API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Add weather data to enriched data\nconst weatherData = $input.item.json.body;\nconst enrichedData = $input.item.json.enrichedData;\n\n// Create simplified weather object\nconst simplifiedWeather = {\n  temperature: weatherData.main?.temp,\n  feels_like: weatherData.main?.feels_like,\n  humidity: weatherData.main?.humidity,\n  pressure: weatherData.main?.pressure,\n  wind_speed: weatherData.wind?.speed,\n  wind_direction: weatherData.wind?.deg,\n  weather_condition: weatherData.weather?.[0]?.main,\n  weather_description: weatherData.weather?.[0]?.description,\n  location_name: weatherData.name,\n  country: weatherData.sys?.country,\n  sunrise: weatherData.sys?.sunrise ? new Date(weatherData.sys.sunrise * 1000).toISOString() : null,\n  sunset: weatherData.sys?.sunset ? new Date(weatherData.sys.sunset * 1000).toISOString() : null,\n  timestamp: new Date().toISOString()\n};\n\n// Return enriched data\nreturn {\n  json: {\n    ...$input.item.json,\n    enrichedData: {\n      ...$input.item.json.enrichedData,\n      weather: simplifiedWeather\n    },\n    enrichmentStatus: {\n      ...$input.item.json.enrichmentStatus,\n      weather: true\n    }\n  }\n};"
+      },
+      "name": "Process Weather Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1040, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Add location data to enriched data\nconst locationData = $input.item.json.body;\nconst enrichedData = $input.item.json.enrichedData;\n\n// Create simplified location object\nconst simplifiedLocation = {\n  address: locationData.address ? {\n    road: locationData.address.road,\n    city: locationData.address.city || locationData.address.town || locationData.address.village,\n    state: locationData.address.state,\n    postcode: locationData.address.postcode,\n    country: locationData.address.country,\n    country_code: locationData.address.country_code\n  } : {},\n  display_name: locationData.display_name,\n  latitude: parseFloat(locationData.lat),\n  longitude: parseFloat(locationData.lon),\n  timestamp: new Date().toISOString()\n};\n\n// Return enriched data\nreturn {\n  json: {\n    ...$input.item.json,\n    enrichedData: {\n      ...$input.item.json.enrichedData,\n      location: simplifiedLocation\n    },\n    enrichmentStatus: {\n      ...$input.item.json.enrichmentStatus,\n      location: true\n    }\n  }\n};"
+      },
+      "name": "Process Location Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1040, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Add Home Assistant data to enriched data\nconst haData = $input.item.json.body;\nconst enrichedData = $input.item.json.enrichedData;\nconst entityIds = $input.item.json.entityIds;\n\n// Create Home Assistant data object\nconst haStates = {};\n\n// Process entity states\nif (Array.isArray(haData)) {\n  haData.forEach(entity => {\n    if (entity.entity_id) {\n      haStates[entity.entity_id] = {\n        state: entity.state,\n        attributes: entity.attributes,\n        last_changed: entity.last_changed,\n        last_updated: entity.last_updated\n      };\n    }\n  });\n} else if (haData.entity_id) {\n  // Single entity response\n  haStates[haData.entity_id] = {\n    state: haData.state,\n    attributes: haData.attributes,\n    last_changed: haData.last_changed,\n    last_updated: haData.last_updated\n  };\n}\n\n// Return enriched data\nreturn {\n  json: {\n    ...$input.item.json,\n    enrichedData: {\n      ...$input.item.json.enrichedData,\n      home_assistant: haStates\n    },\n    enrichmentStatus: {\n      ...$input.item.json.enrichmentStatus,\n      homeassistant: true\n    }\n  }\n};"
+      },
+      "name": "Process Home Assistant Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1040, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Add custom enrichment data\nconst customData = $input.item.json.body;\nconst enrichedData = $input.item.json.enrichedData;\n\n// Check if response is valid\nif (!customData) {\n  return {\n    json: {\n      ...$input.item.json,\n      enrichmentStatus: {\n        ...$input.item.json.enrichmentStatus,\n        custom: false\n      }\n    }\n  };\n}\n\n// Return enriched data\nreturn {\n  json: {\n    ...$input.item.json,\n    enrichedData: {\n      ...$input.item.json.enrichedData,\n      custom: customData\n    },\n    enrichmentStatus: {\n      ...$input.item.json.enrichmentStatus,\n      custom: true\n    }\n  }\n};"
+      },
+      "name": "Process Custom Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1040, 900]
+    },
+    {
+      "parameters": {
+        "batchSize": 0
+      },
+      "name": "Merge Enrichments",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1240, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare final enriched output\nconst items = $input.all;\n\n// Start with original data from first item\nconst originalInput = items[0].json;\nlet enrichedData = originalInput.originalData || {};\nconst enrichmentStatus = {};\n\n// Merge all enrichment results\nitems.forEach(item => {\n  // Check if this item has enriched data\n  if (item.json.enrichedData) {\n    // Merge enriched data, excluding the original properties\n    Object.keys(item.json.enrichedData).forEach(key => {\n      if (key !== 'originalData' && key !== 'enrichmentStatus') {\n        enrichedData[key] = item.json.enrichedData[key];\n      }\n    });\n  }\n  \n  // Merge enrichment status\n  if (item.json.enrichmentStatus) {\n    Object.assign(enrichmentStatus, item.json.enrichmentStatus);\n  }\n});\n\n// Create final output\nreturn {\n  json: {\n    originalData: originalInput.originalData,\n    enrichedData,\n    enrichmentSources: originalInput.enrichmentSources,\n    enrichmentStatus,\n    messageId: originalInput.messageId,\n    timestamp: new Date().toISOString(),\n    enrichmentComplete: true\n  }\n};"
+      },
+      "name": "Prepare Final Output",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1440, 300]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "data-processing-results",
+        "routingKey": "enrichment.complete",
+        "content": "={{ JSON.stringify($json) }}",
+        "options": {
+          "persistent": true,
+          "contentType": "application/json",
+          "headers": {
+            "header": [
+              {
+                "name": "enrichment-sources",
+                "value": "={{ $json.enrichmentSources.join(',') }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Result",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [1640, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "RabbitMQ Input": {
+      "main": [
+        [
+          {
+            "node": "Extract Message Properties",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Message Properties": {
+      "main": [
+        [
+          {
+            "node": "Determine Enrichment Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Enrichment Sources": {
+      "weather": [
+        [
+          {
+            "node": "Weather Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "location": [
+        [
+          {
+            "node": "Location Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "homeassistant": [
+        [
+          {
+            "node": "Home Assistant Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "device": [
+        [
+          {
+            "node": "Device Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "custom": [
+        [
+          {
+            "node": "Custom Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weather Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Process Weather Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Location Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Process Location Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Home Assistant Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Process Home Assistant Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Device Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Merge Enrichments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Custom Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Process Custom Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Weather Data": {
+      "main": [
+        [
+          {
+            "node": "Merge Enrichments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Location Data": {
+      "main": [
+        [
+          {
+            "node": "Merge Enrichments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Home Assistant Data": {
+      "main": [
+        [
+          {
+            "node": "Merge Enrichments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Custom Data": {
+      "main": [
+        [
+          {
+            "node": "Merge Enrichments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Enrichments": {
+      "main": [
+        [
+          {
+            "node": "Prepare Final Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Final Output": {
+      "main": [
+        [
+          {
+            "node": "Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": null,
+  "tags": ["data-processing", "enrichment"],
+  "pinData": {}
+}

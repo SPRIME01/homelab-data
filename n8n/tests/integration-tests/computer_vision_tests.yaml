@@ -1,0 +1,158 @@
+# Computer Vision Workflow Integration Tests
+workflow: "computer-vision-processing"
+name: "Computer Vision Integration Tests"
+
+# General test configuration
+config:
+  execution_timeout: 45  # Seconds
+  requires_mocks: ["triton_inference", "home_assistant"]
+
+# Mock configurations for this test set
+mocks:
+  triton_inference:
+    model_name: "yolov5"
+    input_name: "images"
+    output_name: "output"
+    responses:
+      - input_contains: "front-door"
+        response:
+          boxes:
+            - class_name: "person"
+              confidence: 0.92
+              x1: 100
+              y1: 200
+              x2: 300
+              y2: 500
+      - input_contains: "driveway"
+        response:
+          boxes:
+            - class_name: "car"
+              confidence: 0.88
+              x1: 50
+              y1: 100
+              x2: 450
+              y2: 350
+            - class_name: "person"
+              confidence: 0.32
+              x1: 500
+              y1: 200
+              x2: 550
+              y2: 400
+      - input_contains: "backyard"
+        response:
+          boxes: []
+      - input_contains: "error_test"
+        error: "Model inference failed"
+        status: 500
+
+  home_assistant:
+    responses:
+      - url_contains: "api/events/computer_vision_alert"
+        method: "POST"
+        status: 200
+        body: {"result": "success"}
+      - default:
+          status: 200
+          body: {"result": "success"}
+
+# Test cases
+tests:
+  - name: "Person Detection at Front Door"
+    input:
+      messages:
+        - content:
+            device:
+              entity_id: "camera.front_door"
+              friendly_name: "Front Door Camera"
+            image_data: "base64_encoded_image_data_mockup"
+            format: "jpeg"
+            timestamp: "2023-01-01T12:00:00Z"
+            config_id: "front-door"
+          properties:
+            messageId: "front-door-1"
+            headers:
+              message-type: "camera-image"
+    expected:
+      has_error: false
+      detectionCount: 1
+      objectCounts:
+        person: 1
+      isAlert: true
+      home_assistant_calls:
+        - event: "computer_vision_alert"
+          data:
+            camera_id: "camera.front_door"
+            alert_reason: contains("Person detected")
+
+  - name: "Car Detection in Driveway"
+    input:
+      messages:
+        - content:
+            device:
+              entity_id: "camera.driveway"
+              friendly_name: "Driveway Camera"
+            image_data: "base64_encoded_image_data_mockup"
+            format: "jpeg"
+            timestamp: "2023-01-01T12:05:00Z"
+            config_id: "driveway"
+          properties:
+            messageId: "driveway-1"
+            headers:
+              message-type: "camera-image"
+    expected:
+      has_error: false
+      detectionCount: 1  # Only car passes confidence threshold
+      objectCounts:
+        car: 1
+      isAlert: true
+      home_assistant_calls:
+        - event: "computer_vision_alert"
+          data:
+            camera_id: "camera.driveway"
+            alert_reason: contains("Vehicle detected")
+
+  - name: "No Detection in Backyard"
+    input:
+      messages:
+        - content:
+            device:
+              entity_id: "camera.backyard"
+              friendly_name: "Backyard Camera"
+            image_data: "base64_encoded_image_data_mockup"
+            format: "jpeg"
+            timestamp: "2023-01-01T12:10:00Z"
+            config_id: "backyard"
+          properties:
+            messageId: "backyard-1"
+            headers:
+              message-type: "camera-image"
+    expected:
+      has_error: false
+      detectionCount: 0
+      isAlert: false
+      home_assistant_calls: []
+      rabbitmq_messages:
+        - exchange: "home-assistant-responses"
+          routing_key: "vision.no_detection"
+
+  - name: "Error Handling in Object Detection"
+    input:
+      messages:
+        - content:
+            device:
+              entity_id: "camera.error_test"
+              friendly_name: "Error Test Camera"
+            image_data: "base64_encoded_image_data_mockup"
+            format: "jpeg"
+            timestamp: "2023-01-01T12:15:00Z"
+            config_id: "error_test"
+          properties:
+            messageId: "error-test-1"
+            headers:
+              message-type: "camera-image"
+    expected:
+      has_error: true
+      error_contains: "Model inference failed"
+      rabbitmq_messages:
+        - exchange: "home-assistant-responses"
+          routing_key: "vision.error"

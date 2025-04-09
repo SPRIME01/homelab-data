@@ -1,0 +1,107 @@
+{
+  "name": "Dynamic Scene Scheduler",
+  "nodes": [
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/states/sensor.active_scene",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"state\": \"{{ $json.activeSchedule ? $json.activeSchedule.name : 'none' }}\",\n  \"attributes\": {\n    \"friendly_name\": \"Active Lighting Scene\",\n    \"icon\": \"mdi:lightbulb-group\",\n    \"scene_entities\": {{ $json.sceneEntities ? JSON.stringify($json.sceneEntities) : '[]' }},\n    \"schedule_name\": \"{{ $json.activeSchedule ? $json.activeSchedule.name : 'none' }}\",\n    \"last_changed\": \"{{ $json.timestamp }}\",\n    \"eligible_scenes\": {{ JSON.stringify($json.eligibleSchedules.map(s => s.name)) }},\n    \"current_time\": \"{{ $json.evaluationSummary.currentTime }}\",\n    \"day_of_week\": {{ $json.evaluationSummary.currentDay }}\n  }\n}"
+            }
+          ]
+        }
+      },
+      "name": "Update Scene Status Entity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1400, 520]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Log scene change for analytics\nconst activeSchedule = $input.item.json.activeSchedule;\nconst timestamp = $input.item.json.timestamp;\nconst sceneChanged = $input.item.json.sceneChanged;\n\n// Get logs from static data or initialize\nlet sceneLogs = $getWorkflowStaticData('global').sceneLogs || [];\n\n// Only log if there was an actual scene change\nif (sceneChanged && activeSchedule) {\n  // Add new log entry\n  sceneLogs.push({\n    scheduleName: activeSchedule.name,\n    timestamp: timestamp,\n    sceneEntities: activeSchedule.sceneEntities,\n    conditions: activeSchedule.conditions || [],\n    timeRanges: activeSchedule.timeRanges || []\n  });\n  \n  // Limit log size to last 100 entries\n  if (sceneLogs.length > 100) {\n    sceneLogs = sceneLogs.slice(-100);\n  }\n  \n  // Save updated logs\n  $setWorkflowStaticData('global', { sceneLogs });\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    logsUpdated: sceneChanged,\n    logCount: sceneLogs.length\n  }\n};"
+      },
+      "name": "Log Scene Change",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1400, 660]
+    }
+  ],
+  "connections": {
+    "Wait for Actions to Complete": {
+      "main": [
+        [
+          {
+            "node": "Update Scene Status Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Scene Status Entity": {
+      "main": [
+        [
+          {
+            "node": "Log Scene Change",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Announce Morning Briefing": {
+      "main": [
+        [
+          {
+            "node": "Update Scene Status Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Dashboard Entity": {
+      "main": [
+        [
+          {
+            "node": "Update Scene Status Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": {
+    "global": {
+      "activeScene": null,
+      "sceneLogs": []
+    }
+  },
+  "tags": ["automation", "lighting", "scheduling"],
+  "pinData": {}
+}

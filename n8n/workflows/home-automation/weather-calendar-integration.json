@@ -1,0 +1,357 @@
+{
+  "name": "Weather & Calendar Integration",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "name": "Weather & Calendar Sync",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openweathermap.org/data/2.5/onecall?lat={{$env.HOME_LAT}}&lon={{$env.HOME_LON}}&appid={{$env.OPENWEATHERMAP_API_KEY}}&units=metric&exclude=minutely,alerts",
+        "options": {
+          "responseFormat": "json"
+        }
+      },
+      "name": "Get Weather Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [400, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin={{ new Date().toISOString() }}&timeMax={{ new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() }}&singleEvents=true&orderBy=startTime&maxResults=10",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2",
+        "options": {
+          "responseFormat": "json"
+        }
+      },
+      "name": "Get Calendar Events",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [400, 400],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "4",
+          "name": "Google Calendar"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process weather data into a more usable format\nconst weatherData = $input.item.json;\n\n// Process current weather\nconst current = {\n  temperature: weatherData.current.temp,\n  feelsLike: weatherData.current.feels_like,\n  humidity: weatherData.current.humidity,\n  pressure: weatherData.current.pressure,\n  windSpeed: weatherData.current.wind_speed,\n  windDirection: weatherData.current.wind_deg,\n  clouds: weatherData.current.clouds,\n  uvi: weatherData.current.uvi,\n  visibility: weatherData.current.visibility,\n  condition: weatherData.current.weather[0].main,\n  description: weatherData.current.weather[0].description,\n  icon: weatherData.current.weather[0].icon,\n  timestamp: new Date(weatherData.current.dt * 1000).toISOString()\n};\n\n// Process hourly forecast (next 24 hours)\nconst hourly = weatherData.hourly.slice(0, 24).map(hour => ({\n  temperature: hour.temp,\n  feelsLike: hour.feels_like,\n  humidity: hour.humidity,\n  pressure: hour.pressure,\n  windSpeed: hour.wind_speed,\n  windDirection: hour.wind_deg,\n  condition: hour.weather[0].main,\n  description: hour.weather[0].description,\n  icon: hour.weather[0].icon,\n  pop: hour.pop, // Probability of precipitation\n  timestamp: new Date(hour.dt * 1000).toISOString()\n}));\n\n// Process daily forecast (7 days)\nconst daily = weatherData.daily.map(day => ({\n  tempMin: day.temp.min,\n  tempMax: day.temp.max,\n  humidity: day.humidity,\n  windSpeed: day.wind_speed,\n  windDirection: day.wind_deg,\n  condition: day.weather[0].main,\n  description: day.weather[0].description,\n  icon: day.weather[0].icon,\n  pop: day.pop,\n  sunrise: new Date(day.sunrise * 1000).toISOString(),\n  sunset: new Date(day.sunset * 1000).toISOString(),\n  timestamp: new Date(day.dt * 1000).toISOString()\n}));\n\n// Create weather summary and recommendations\nconst currentTemp = current.temperature;\nconst maxToday = daily[0].tempMax;\nconst minToday = daily[0].tempMin;\nconst rainChanceToday = Math.round(daily[0].pop * 100);\nconst rainChanceNext3Hours = Math.max(...hourly.slice(0, 3).map(h => h.pop)) * 100;\n\n// Generate weather summary\nlet weatherSummary = `Currently ${currentTemp.toFixed(1)}°C, feels like ${current.feelsLike.toFixed(1)}°C with ${current.description}.`;\nweatherSummary += ` Today: High ${maxToday.toFixed(1)}°C, Low ${minToday.toFixed(1)}°C.`;\n\nif (rainChanceToday > 30) {\n  weatherSummary += ` ${rainChanceToday}% chance of rain today.`;\n}\n\n// Generate recommendations\nconst recommendations = [];\n\n// Rain recommendations\nif (rainChanceNext3Hours > 50) {\n  recommendations.push({\n    type: 'rain',\n    message: 'Take an umbrella if going out',\n    priority: 'high'\n  });\n} else if (rainChanceToday > 50) {\n  recommendations.push({\n    type: 'rain',\n    message: 'Rain likely today, plan accordingly',\n    priority: 'medium'\n  });\n}\n\n// Temperature recommendations\nif (maxToday > 30) {\n  recommendations.push({\n    type: 'heat',\n    message: 'Very hot today, stay hydrated',\n    priority: 'high'\n  });\n} else if (minToday < 5) {\n  recommendations.push({\n    type: 'cold',\n    message: 'Cold temperatures expected, dress warmly',\n    priority: 'high'\n  });\n}\n\n// UV recommendations\nif (current.uvi > 7) {\n  recommendations.push({\n    type: 'uv',\n    message: 'High UV index, use sun protection',\n    priority: 'high'\n  });\n}\n\n// Wind recommendations\nif (current.windSpeed > 10) {\n  recommendations.push({\n    type: 'wind',\n    message: 'Strong winds, secure loose items outdoors',\n    priority: 'medium'\n  });\n}\n\nreturn {\n  json: {\n    timestamp: new Date().toISOString(),\n    current,\n    hourly,\n    daily,\n    summary: weatherSummary,\n    recommendations\n  }\n};"
+      },
+      "name": "Process Weather Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [600, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process calendar events\nconst calendarData = $input.item.json;\nconst now = new Date();\nconst tomorrow = new Date(now);\ntomorrow.setDate(tomorrow.getDate() + 1);\ntomorrow.setHours(0, 0, 0, 0);\n\nconst todayFormatted = now.toISOString().slice(0, 10);\nconst tomorrowFormatted = tomorrow.toISOString().slice(0, 10);\n\n// Extract and format events\nconst events = (calendarData.items || []).map(event => {\n  // Parse start and end times, handling all-day events\n  let start, end, isAllDay = false;\n  \n  if (event.start.dateTime) {\n    start = new Date(event.start.dateTime);\n    end = new Date(event.end.dateTime);\n  } else {\n    // All-day event\n    start = new Date(event.start.date + 'T00:00:00');\n    end = new Date(event.end.date + 'T23:59:59');\n    isAllDay = true;\n  }\n  \n  // Calculate event status\n  let status = 'upcoming';\n  if (now > end) {\n    status = 'past';\n  } else if (now >= start && now <= end) {\n    status = 'current';\n  }\n  \n  // Format the event\n  return {\n    id: event.id,\n    summary: event.summary,\n    description: event.description,\n    location: event.location,\n    start: start.toISOString(),\n    end: end.toISOString(),\n    isAllDay,\n    status,\n    attendees: (event.attendees || []).map(a => a.email),\n    calendar: event.organizer ? event.organizer.displayName : 'Primary',\n    dayOfEvent: start.toISOString().slice(0, 10)\n  };\n});\n\n// Group events by day\nconst eventsByDay = {};\nevents.forEach(event => {\n  const day = event.dayOfEvent;\n  if (!eventsByDay[day]) {\n    eventsByDay[day] = [];\n  }\n  eventsByDay[day].push(event);\n});\n\n// Filter events for today and tomorrow\nconst todayEvents = eventsByDay[todayFormatted] || [];\nconst tomorrowEvents = eventsByDay[tomorrowFormatted] || [];\n\n// Create event summaries\nconst todaySummary = todayEvents.length > 0 \n  ? `${todayEvents.length} event${todayEvents.length > 1 ? 's' : ''} today` \n  : 'No events today';\n\nconst tomorrowSummary = tomorrowEvents.length > 0 \n  ? `${tomorrowEvents.length} event${tomorrowEvents.length > 1 ? 's' : ''} tomorrow` \n  : 'No events tomorrow';\n\n// Find next event\nconst upcomingEvents = events.filter(e => e.status === 'upcoming').sort((a, b) => \n  new Date(a.start).getTime() - new Date(b.start).getTime()\n);\n\nconst nextEvent = upcomingEvents.length > 0 ? upcomingEvents[0] : null;\n\n// Calculate time until next event\nlet timeUntilNext = '';\nif (nextEvent) {\n  const minutesUntil = Math.floor((new Date(nextEvent.start).getTime() - now.getTime()) / 60000);\n  if (minutesUntil < 60) {\n    timeUntilNext = `${minutesUntil} minute${minutesUntil !== 1 ? 's' : ''}`;\n  } else {\n    const hoursUntil = Math.floor(minutesUntil / 60);\n    if (hoursUntil < 24) {\n      timeUntilNext = `${hoursUntil} hour${hoursUntil !== 1 ? 's' : ''}`;\n    } else {\n      const daysUntil = Math.floor(hoursUntil / 24);\n      timeUntilNext = `${daysUntil} day${daysUntil !== 1 ? 's' : ''}`;\n    }\n  }\n}\n\n// Generate event recommendations\nconst recommendations = [];\n\n// Check for imminent events\nif (nextEvent && new Date(nextEvent.start).getTime() - now.getTime() < 30 * 60 * 1000) {\n  recommendations.push({\n    type: 'event_reminder',\n    message: `Event '${nextEvent.summary}' starting soon`,\n    priority: 'high',\n    eventId: nextEvent.id\n  });\n}\n\n// Check for events needing travel time\nif (nextEvent && nextEvent.location && new Date(nextEvent.start).getTime() - now.getTime() < 2 * 60 * 60 * 1000) {\n  recommendations.push({\n    type: 'travel_reminder',\n    message: `Time to leave for '${nextEvent.summary}' at ${nextEvent.location}`,\n    priority: 'high',\n    eventId: nextEvent.id\n  });\n}\n\n// Check for preparation needed\nif (todayEvents.some(e => e.summary.toLowerCase().includes('meeting') || e.summary.toLowerCase().includes('appointment'))) {\n  recommendations.push({\n    type: 'preparation',\n    message: 'You have meetings/appointments today, prepare accordingly',\n    priority: 'medium'\n  });\n}\n\nreturn {\n  json: {\n    timestamp: new Date().toISOString(),\n    allEvents: events,\n    eventsByDay,\n    todayEvents,\n    tomorrowEvents,\n    nextEvent,\n    timeUntilNext,\n    summary: {\n      today: todaySummary,\n      tomorrow: tomorrowSummary,\n      next: nextEvent ? `Next: ${nextEvent.summary} in ${timeUntilNext}` : 'No upcoming events'\n    },\n    recommendations\n  }\n};"
+      },
+      "name": "Process Calendar Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [600, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Combine weather and calendar data into integrated recommendations\nconst weatherData = $node['Process Weather Data'].json;\nconst calendarData = $node['Process Calendar Data'].json;\n\n// Combine all recommendations\nconst combinedRecommendations = [\n  ...weatherData.recommendations,\n  ...calendarData.recommendations\n].sort((a, b) => {\n  // Sort by priority: high > medium > low\n  const priorityOrder = { high: 1, medium: 2, low: 3 };\n  return priorityOrder[a.priority] - priorityOrder[b.priority];\n});\n\n// Create morning briefing integrating weather and calendar\nconst currentWeather = weatherData.current;\nconst todaySummary = weatherData.daily[0];\n\nlet morningBriefing = `Good morning! Today will be ${todaySummary.description} with a high of ${todaySummary.tempMax.toFixed(1)}°C and a low of ${todaySummary.tempMin.toFixed(1)}°C.`;\n\nif (todaySummary.pop > 0.3) {\n  morningBriefing += ` There is a ${Math.round(todaySummary.pop * 100)}% chance of rain today.`;\n}\n\nmorningBriefing += ` Currently it's ${currentWeather.temperature.toFixed(1)}°C and ${currentWeather.description}.`;\n\n// Add calendar information\nif (calendarData.todayEvents.length > 0) {\n  morningBriefing += ` You have ${calendarData.todayEvents.length} event${calendarData.todayEvents.length > 1 ? 's' : ''} today.`;\n  \n  // Mention the first few events\n  const eventsToMention = calendarData.todayEvents.slice(0, 3);\n  eventsToMention.forEach((event, index) => {\n    const time = new Date(event.start).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});\n    morningBriefing += `${index === 0 ? ' First' : ' Then'}, ${event.summary} at ${time}.`;\n  });\n  \n  if (calendarData.todayEvents.length > 3) {\n    morningBriefing += ` And ${calendarData.todayEvents.length - 3} more event${calendarData.todayEvents.length - 3 > 1 ? 's' : ''}.`;\n  }\n} else {\n  morningBriefing += ` You have no events scheduled for today.`;\n}\n\n// Add high priority recommendations\nconst highPriorityRecs = combinedRecommendations.filter(r => r.priority === 'high');\nif (highPriorityRecs.length > 0) {\n  morningBriefing += ` Important reminders: ${highPriorityRecs.map(r => r.message).join(', ')}.`;\n}\n\n// Check if we need to modify Home Assistant automation based on weather\nconst automationChanges = [];\n\n// Rain expected - suggest turning on automatic lights\nif (todaySummary.pop > 0.5) {\n  automationChanges.push({\n    entity_id: 'input_boolean.rainy_day_lighting',\n    state: 'on',\n    reason: 'High chance of rain today'\n  });\n}\n\n// Extreme temperature - adjust thermostat settings\nif (todaySummary.tempMax > 30) {\n  automationChanges.push({\n    entity_id: 'input_boolean.hot_day_climate',\n    state: 'on',\n    reason: 'Very hot day expected'\n  });\n} else if (todaySummary.tempMin < 5) {\n  automationChanges.push({\n    entity_id: 'input_boolean.cold_day_climate',\n    state: 'on', \n    reason: 'Cold day expected'\n  });\n}\n\n// Generate Home Assistant dashboard data\nconst dashboardData = {\n  today_weather: {\n    temp_current: currentWeather.temperature,\n    temp_high: todaySummary.tempMax,\n    temp_low: todaySummary.tempMin,\n    condition: currentWeather.condition,\n    description: currentWeather.description,\n    icon: currentWeather.icon,\n    humidity: currentWeather.humidity,\n    wind_speed: currentWeather.windSpeed,\n    rain_chance: todaySummary.pop * 100\n  },\n  forecast: weatherData.daily.slice(1, 5).map(day => ({\n    date: day.timestamp.slice(0, 10),\n    temp_high: day.tempMax,\n    temp_low: day.tempMin,\n    condition: day.condition,\n    icon: day.icon,\n    rain_chance: day.pop * 100\n  })),\n  calendar: {\n    today_count: calendarData.todayEvents.length,\n    today_events: calendarData.todayEvents.map(e => ({\n      title: e.summary,\n      time: new Date(e.start).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),\n      location: e.location || null\n    })),\n    next_event: calendarData.nextEvent ? {\n      title: calendarData.nextEvent.summary,\n      time: new Date(calendarData.nextEvent.start).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),\n      time_until: calendarData.timeUntilNext,\n      location: calendarData.nextEvent.location || null\n    } : null\n  },\n  recommendations: combinedRecommendations.slice(0, 5),\n  morning_briefing: morningBriefing\n};\n\nreturn {\n  json: {\n    timestamp: new Date().toISOString(),\n    weatherData: {\n      current: weatherData.current,\n      summary: weatherData.summary,\n      daily: weatherData.daily.slice(0, 5)\n    },\n    calendarData: {\n      todayEvents: calendarData.todayEvents,\n      tomorrowEvents: calendarData.tomorrowEvents,\n      nextEvent: calendarData.nextEvent,\n      summary: calendarData.summary\n    },\n    recommendations: combinedRecommendations,\n    morningBriefing,\n    automationChanges,\n    dashboardData\n  }\n};"
+      },
+      "name": "Combine Data & Generate Recommendations",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [800, 300]
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "options": {},
+        "items": "={{ $json.automationChanges }}"
+      },
+      "name": "Process Automation Changes",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [1000, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://homeassistant.local:8123/api/services/input_boolean/turn_{{ $json.state }}",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={ \"entity_id\": \"{{ $json.entity_id }}\" }"
+            }
+          ]
+        }
+      },
+      "name": "Update Home Assistant Automation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1200, 200]
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "options": {},
+        "items": "={{ [\n  { entity_id: 'sensor.weather_summary', state: $json.weatherData.summary, icon: 'mdi:weather-partly-cloudy' },\n  { entity_id: 'sensor.calendar_summary', state: $json.calendarData.summary.today, icon: 'mdi:calendar' },\n  { entity_id: 'sensor.next_event', state: $json.calendarData.summary.next, icon: 'mdi:calendar-clock' },\n  { entity_id: 'sensor.morning_briefing', state: $json.morningBriefing, icon: 'mdi:text-box-outline' }\n] }}"
+      },
+      "name": "Process Entity Updates",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [1000, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://homeassistant.local:8123/api/states/{{ $json.entity_id }}",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"state\": \"{{ $json.state }}\",\n  \"attributes\": {\n    \"friendly_name\": \"{{ $json.entity_id.split('.')[1].replace(/_/g, ' ').replace(/\\b\\w/g, l => l.toUpperCase()) }}\",\n    \"icon\": \"{{ $json.icon }}\",\n    \"last_updated\": \"{{ $now() }}\"\n  }\n}"
+            }
+          ]
+        }
+      },
+      "name": "Update Entity State",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1200, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/states/sensor.combined_dashboard_data",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"state\": \"updated\",\n  \"attributes\": {\n    \"friendly_name\": \"Dashboard Data\",\n    \"icon\": \"mdi:view-dashboard\",\n    \"weather\": {{ JSON.stringify($json.dashboardData.today_weather) }},\n    \"forecast\": {{ JSON.stringify($json.dashboardData.forecast) }},\n    \"calendar\": {{ JSON.stringify($json.dashboardData.calendar) }},\n    \"recommendations\": {{ JSON.stringify($json.dashboardData.recommendations) }},\n    \"morning_briefing\": {{ JSON.stringify($json.dashboardData.morning_briefing) }},\n    \"dashboard_card\": {{ JSON.stringify({\n      \"type\": \"custom:vertical-stack-in-card\",\n      \"cards\": [\n        {\n          \"type\": \"markdown\",\n          \"content\": `# Current Weather\\n\\n${$json.dashboardData.today_weather.temp_current.toFixed(1)}°C - ${$json.dashboardData.today_weather.description}\\n\\nHigh: ${$json.dashboardData.today_weather.temp_high.toFixed(1)}°C | Low: ${$json.dashboardData.today_weather.temp_low.toFixed(1)}°C | Rain: ${Math.round($json.dashboardData.today_weather.rain_chance)}%`\n        },\n        {\n          \"type\": \"markdown\",\n          \"content\": `# Calendar\\n\\n${$json.dashboardData.calendar.next_event ? `Next: ${$json.dashboardData.calendar.next_event.title} in ${$json.dashboardData.calendar.next_event.time_until}` : 'No upcoming events'}\\n\\nToday: ${$json.dashboardData.calendar.today_count} event${$json.dashboardData.calendar.today_count !== 1 ? 's' : ''}`\n        },\n        {\n          \"type\": \"markdown\",\n          \"content\": `# Recommendations\\n\\n${$json.dashboardData.recommendations.length > 0 ? $json.dashboardData.recommendations.map(r => `* ${r.message}`).join('\\n') : 'No recommendations'}`\n        }\n      ]\n    }) }},\n    \"last_updated\": \"{{ $now() }}\"\n  }\n}"
+            }
+          ]
+        }
+      },
+      "name": "Update Dashboard Entity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1000, 600]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/services/notify/mobile_app",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"message\": \"{{ $json.morningBriefing }}\",\n  \"title\": \"Morning Briefing\",\n  \"data\": {\n    \"notification_icon\": \"mdi:weather-{{ $json.weatherData.current.condition.toLowerCase() }}\",\n    \"actions\": [\n      {\n        \"action\": \"view_calendar\",\n        \"title\": \"View Calendar\"\n      },\n      {\n        \"action\": \"view_weather\",\n        \"title\": \"View Weather\"\n      }\n    ]\n  }\n}"
+            }
+          ]
+        }
+      },
+      "name": "Send Morning Briefing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1200, 600]
+    }
+  ],
+  "connections": {
+    "Weather & Calendar Sync": {
+      "main": [
+        [
+          {
+            "node": "Get Weather Data",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Calendar Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Weather Data": {
+      "main": [
+        [
+          {
+            "node": "Process Weather Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Calendar Events": {
+      "main": [
+        [
+          {
+            "node": "Process Calendar Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Weather Data": {
+      "main": [
+        [
+          {
+            "node": "Combine Data & Generate Recommendations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Calendar Data": {
+      "main": [
+        [
+          {
+            "node": "Combine Data & Generate Recommendations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Data & Generate Recommendations": {
+      "main": [
+        [
+          {
+            "node": "Process Automation Changes",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Process Entity Updates",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Update Dashboard Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Automation Changes": {
+      "main": [
+        [
+          {
+            "node": "Update Home Assistant Automation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Entity Updates": {
+      "main": [
+        [
+          {
+            "node": "Update Entity State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Dashboard Entity": {
+      "main": [
+        [
+          {
+            "node": "Send Morning Briefing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": null,
+  "tags": ["automation", "weather", "calendar", "integration"],
+  "pinData": {}
+}

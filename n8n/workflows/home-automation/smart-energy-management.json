@@ -1,0 +1,230 @@
+{
+  "name": "Smart Energy Management",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "name": "15-Minute Interval",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://homeassistant.local:8123/api/states",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "name": "Get Current Home State",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Load configuration from static data\nlet config = $getWorkflowStaticData('global').config;\n\n// Initialize with defaults if not set\nif (!config) {\n  config = {\n    powerPriceThresholds: {\n      low: 0.1,    // €/kWh\n      medium: 0.2, // €/kWh\n      high: 0.3    // €/kWh\n    },\n    gridLoadThresholds: {\n      low: 20,     // % of capacity\n      medium: 50,  // % of capacity\n      high: 80     // % of capacity\n    },\n    solarThresholds: {\n      low: 100,     // Watts\n      medium: 1000, // Watts\n      high: 3000    // Watts\n    },\n    devicePriorities: [\n      { entity_id: 'switch.ev_charger', priority: 'low', max_power: 7000 },\n      { entity_id: 'switch.water_heater', priority: 'medium', max_power: 2000 },\n      { entity_id: 'switch.dishwasher', priority: 'medium', max_power: 1500 },\n      { entity_id: 'switch.washing_machine', priority: 'medium', max_power: 1200 },\n      { entity_id: 'switch.air_conditioner', priority: 'high', max_power: 2500 },\n      { entity_id: 'light.living_room', priority: 'critical', max_power: 100 }\n    ],\n    priorityLevels: ['low', 'medium', 'high', 'critical'],\n    batterySettings: {\n      min_level: 20,      // %\n      reserve_threshold: 50, // %\n      discharge_threshold: 70 // %\n    },\n    roomComfortSettings: {\n      living_room: { min_temp: 19, max_temp: 25 },\n      bedroom: { min_temp: 18, max_temp: 23 },\n      kitchen: { min_temp: 19, max_temp: 26 }\n    }\n  };\n  $setWorkflowStaticData('global', { config });\n}\n\n// Extract relevant states from Home Assistant response\nconst states = $input.item.json;\n\n// Find energy-related states\nconst powerPrice = parseFloat(states.find(s => s.entity_id === 'sensor.electricity_price')?.state || '0.2');\nconst gridLoad = parseFloat(states.find(s => s.entity_id === 'sensor.grid_load_percentage')?.state || '50');\nconst solarPower = parseFloat(states.find(s => s.entity_id === 'sensor.solar_power_generation')?.state || '0');\nconst batteryLevel = parseFloat(states.find(s => s.entity_id === 'sensor.home_battery_level')?.state || '50');\nconst gridImport = parseFloat(states.find(s => s.entity_id === 'sensor.grid_power_import')?.state || '0');\nconst gridExport = parseFloat(states.find(s => s.entity_id === 'sensor.grid_power_export')?.state || '0');\nconst totalConsumption = parseFloat(states.find(s => s.entity_id === 'sensor.home_power_consumption')?.state || '1000');\n\n// Find occupancy state\nconst isOccupied = states.find(s => s.entity_id === 'binary_sensor.home_occupied')?.state === 'on';\n\n// Get device states\nconst deviceStates = config.devicePriorities.map(device => {\n  const state = states.find(s => s.entity_id === device.entity_id);\n  return {\n    ...device,\n    current_state: state?.state || 'off',\n    friendly_name: state?.attributes?.friendly_name || device.entity_id,\n    actual_power: parseFloat(state?.attributes?.current_power || device.max_power * 0.8)\n  };\n});\n\n// Get room temperatures\nconst roomTemperatures = {};\nObject.keys(config.roomComfortSettings).forEach(room => {\n  const sensor = `sensor.${room}_temperature`;\n  roomTemperatures[room] = parseFloat(states.find(s => s.entity_id === sensor)?.state || '21');\n});\n\n// Categorize current conditions\nlet priceCategory, gridCategory, solarCategory;\n\nif (powerPrice <= config.powerPriceThresholds.low) {\n  priceCategory = 'low';\n} else if (powerPrice <= config.powerPriceThresholds.medium) {\n  priceCategory = 'medium';\n} else if (powerPrice <= config.powerPriceThresholds.high) {\n  priceCategory = 'high';\n} else {\n  priceCategory = 'very_high';\n}\n\nif (gridLoad <= config.gridLoadThresholds.low) {\n  gridCategory = 'low';\n} else if (gridLoad <= config.gridLoadThresholds.medium) {\n  gridCategory = 'medium';\n} else if (gridLoad <= config.gridLoadThresholds.high) {\n  gridCategory = 'high';\n} else {\n  gridCategory = 'very_high';\n}\n\nif (solarPower <= config.solarThresholds.low) {\n  solarCategory = 'low';\n} else if (solarPower <= config.solarThresholds.medium) {\n  solarCategory = 'medium';\n} else if (solarPower <= config.solarThresholds.high) {\n  solarCategory = 'high';\n} else {\n  solarCategory = 'very_high';\n}\n\n// Calculate current power balance\nconst powerBalance = {\n  net: solarPower - totalConsumption + (gridImport - gridExport),\n  solar_covering_percentage: totalConsumption > 0 ? (solarPower / totalConsumption) * 100 : 0,\n  is_self_sufficient: solarPower >= totalConsumption,\n  is_exporting: gridExport > 0,\n  is_importing: gridImport > 0\n};\n\n// Determine appropriate battery operation mode\nlet batteryMode;\nif (batteryLevel <= config.batterySettings.min_level) {\n  batteryMode = 'charge_only';\n} else if (priceCategory === 'low' || solarCategory === 'high') {\n  batteryMode = 'charge';\n} else if (batteryLevel >= config.batterySettings.discharge_threshold && (priceCategory === 'high' || priceCategory === 'very_high')) {\n  batteryMode = 'discharge';\n} else if (batteryLevel >= config.batterySettings.reserve_threshold) {\n  batteryMode = 'smart';\n} else {\n  batteryMode = 'hold';\n}\n\nreturn {\n  json: {\n    timestamp: new Date().toISOString(),\n    energy_status: {\n      power_price: powerPrice,\n      price_category: priceCategory,\n      grid_load: gridLoad,\n      grid_category: gridCategory,\n      solar_power: solarPower,\n      solar_category: solarCategory,\n      battery_level: batteryLevel,\n      battery_mode: batteryMode,\n      power_balance: powerBalance\n    },\n    house_status: {\n      is_occupied: isOccupied,\n      total_consumption: totalConsumption,\n      room_temperatures: roomTemperatures\n    },\n    devices: deviceStates,\n    config: config\n  }\n};"
+      },
+      "name": "Analyze Energy Situation",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Decide which devices should be running based on current energy conditions\nconst energyStatus = $input.item.json.energy_status;\nconst houseStatus = $input.item.json.house_status;\nconst devices = $input.item.json.devices;\nconst config = $input.item.json.config;\n\n// Calculate energy score based on multiple factors (0-100, higher = more energy available)\nlet energyScore = 0;\n\n// Price factor: lower price = higher score (0-40 points)\nif (energyStatus.price_category === 'low') {\n  energyScore += 40;\n} else if (energyStatus.price_category === 'medium') {\n  energyScore += 20;\n} else if (energyStatus.price_category === 'high') {\n  energyScore += 5;\n}\n\n// Solar factor: higher generation = higher score (0-40 points)\nif (energyStatus.solar_category === 'very_high') {\n  energyScore += 40;\n} else if (energyStatus.solar_category === 'high') {\n  energyScore += 30;\n} else if (energyStatus.solar_category === 'medium') {\n  energyScore += 15;\n} else if (energyStatus.solar_category === 'low') {\n  energyScore += 5;\n}\n\n// Grid factor: lower load = higher score (0-20 points)\nif (energyStatus.grid_category === 'low') {\n  energyScore += 20;\n} else if (energyStatus.grid_category === 'medium') {\n  energyScore += 10;\n} else if (energyStatus.grid_category === 'high') {\n  energyScore += 5;\n}\n\n// Battery factor: adjust score based on battery level\nif (energyStatus.battery_level > 80) {\n  energyScore += 10;\n} else if (energyStatus.battery_level < 30) {\n  energyScore -= 10;\n}\n\n// Calculate which priority levels we allow to run\n// Higher energy score = more devices allowed to run\nlet allowedPriorities = [];\nif (energyScore >= 75) {\n  // Allow all devices to run\n  allowedPriorities = [...config.priorityLevels];\n} else if (energyScore >= 50) {\n  // Allow medium and higher priority devices\n  allowedPriorities = config.priorityLevels.filter(p => p !== 'low');\n} else if (energyScore >= 25) {\n  // Allow only high and critical priority devices\n  allowedPriorities = config.priorityLevels.filter(p => p === 'high' || p === 'critical');\n} else {\n  // Allow only critical devices\n  allowedPriorities = ['critical'];\n}\n\n// Special case: If house is unoccupied, further restrict unless we have excess solar\nif (!houseStatus.is_occupied && energyStatus.solar_category !== 'very_high') {\n  allowedPriorities = config.priorityLevels.filter(p => p === 'critical' || \n    (p === 'high' && energyStatus.solar_category === 'high'));\n}\n\n// Determine target state for each device\nconst deviceActions = [];\ndevices.forEach(device => {\n  const shouldBeOn = allowedPriorities.includes(device.priority);\n  \n  // Special temperature-based handling for climate devices\n  if (device.entity_id.includes('climate') || device.entity_id.includes('heater') || device.entity_id.includes('ac')) {\n    const room = Object.keys(houseStatus.room_temperatures).find(r => device.entity_id.includes(r));\n    \n    if (room) {\n      const roomTemp = houseStatus.room_temperatures[room];\n      const settings = config.roomComfortSettings[room];\n      \n      // Consider temperature needs regardless of energy situation\n      if (roomTemp < settings.min_temp) {\n        // Need heating - override energy restrictions if significantly below comfort\n        deviceActions.push({\n          entity_id: device.entity_id,\n          current_state: device.current_state,\n          target_state: 'on',\n          action: device.current_state === 'on' ? 'keep_on' : 'turn_on',\n          reason: `Room temperature ${roomTemp}°C below minimum ${settings.min_temp}°C`,\n          priority_override: true\n        });\n        return; // Skip to next device\n      } else if (roomTemp > settings.max_temp) {\n        // Need cooling - override energy restrictions if significantly above comfort\n        deviceActions.push({\n          entity_id: device.entity_id,\n          current_state: device.current_state,\n          target_state: 'on',\n          action: device.current_state === 'on' ? 'keep_on' : 'turn_on',\n          reason: `Room temperature ${roomTemp}°C above maximum ${settings.max_temp}°C`,\n          priority_override: true\n        });\n        return; // Skip to next device\n      }\n    }\n  }\n  \n  // Normal device handling based on energy situation\n  const newState = shouldBeOn ? 'on' : 'off';\n  let action;\n  \n  if (device.current_state === 'on' && newState === 'off') {\n    action = 'turn_off';\n  } else if (device.current_state === 'off' && newState === 'on') {\n    action = 'turn_on';\n  } else {\n    action = device.current_state === 'on' ? 'keep_on' : 'keep_off';\n  }\n  \n  deviceActions.push({\n    entity_id: device.entity_id,\n    current_state: device.current_state,\n    target_state: newState,\n    action,\n    reason: shouldBeOn ? \n      `Device priority ${device.priority} allowed with energy score ${energyScore}` : \n      `Device priority ${device.priority} restricted with energy score ${energyScore}`,\n    priority_override: false\n  });\n});\n\n// Handle battery actions\nlet batteryAction = null;\nif (energyStatus.battery_mode === 'charge') {\n  batteryAction = {\n    entity_id: 'switch.battery_charger',\n    current_state: 'unknown',\n    target_state: 'on',\n    action: 'turn_on',\n    reason: `Charging battery at ${energyStatus.battery_level}% with energy score ${energyScore}`,\n    priority_override: false\n  };\n} else if (energyStatus.battery_mode === 'discharge') {\n  batteryAction = {\n    entity_id: 'switch.battery_inverter',\n    current_state: 'unknown',\n    target_state: 'on',\n    action: 'turn_on',\n    reason: `Discharging battery at ${energyStatus.battery_level}% with energy score ${energyScore}`,\n    priority_override: false\n  };\n} else if (energyStatus.battery_mode === 'hold') {\n  batteryAction = {\n    entity_id: 'switch.battery_system',\n    current_state: 'unknown',\n    target_state: 'off',\n    action: 'turn_off',\n    reason: `Holding battery at ${energyStatus.battery_level}% with energy score ${energyScore}`,\n    priority_override: false\n  };\n}\n\nif (batteryAction) {\n  deviceActions.push(batteryAction);\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    energy_score: energyScore,\n    allowed_priorities: allowedPriorities,\n    device_actions: deviceActions,\n    actions_summary: {\n      turn_on: deviceActions.filter(d => d.action === 'turn_on').length,\n      turn_off: deviceActions.filter(d => d.action === 'turn_off').length,\n      keep_on: deviceActions.filter(d => d.action === 'keep_on').length,\n      keep_off: deviceActions.filter(d => d.action === 'keep_off').length\n    }\n  }\n};"
+      },
+      "name": "Determine Device Actions",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [800, 300]
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "options": {},
+        "items": "={{ $json.device_actions.filter(a => a.action === \"turn_on\" || a.action === \"turn_off\") }}"
+      },
+      "name": "Execute Device Actions",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [1000, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://homeassistant.local:8123/api/services/{{ $json.action === 'turn_on' ? 'switch/turn_on' : 'switch/turn_off' }}",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={ \"entity_id\": \"{{ $json.entity_id }}\" }"
+            }
+          ]
+        }
+      },
+      "name": "Send Device Command",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/states/sensor.energy_management_status",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={{ {\n  \"state\": $json.energy_score,\n  \"attributes\": {\n    \"friendly_name\": \"Energy Management Status\",\n    \"icon\": \"mdi:home-lightning-bolt-outline\",\n    \"energy_score\": $json.energy_score,\n    \"price_category\": $json.energy_status.price_category,\n    \"solar_category\": $json.energy_status.solar_category,\n    \"battery_level\": $json.energy_status.battery_level,\n    \"battery_mode\": $json.energy_status.battery_mode,\n    \"allowed_priorities\": $json.allowed_priorities,\n    \"actions_summary\": $json.actions_summary,\n    \"last_updated\": $json.timestamp\n  }\n} }}"
+            }
+          ]
+        }
+      },
+      "name": "Update Energy Status Entity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1000, 520]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Log energy management decisions\nconst now = new Date();\nconst timestamp = now.toISOString();\nconst data = $input.item.json;\n\n// Prepare log entry\nconst logEntry = {\n  timestamp,\n  energy_score: data.energy_score,\n  price_category: data.energy_status.price_category,\n  solar_category: data.energy_status.solar_category,\n  grid_category: data.energy_status.grid_category,\n  battery_level: data.energy_status.battery_level,\n  battery_mode: data.energy_status.battery_mode,\n  is_occupied: data.house_status.is_occupied,\n  allowed_priorities: data.allowed_priorities,\n  actions_taken: data.device_actions\n    .filter(a => a.action === 'turn_on' || a.action === 'turn_off')\n    .map(a => ({ entity_id: a.entity_id, action: a.action, reason: a.reason }))\n};\n\n// Get existing logs from static data\nlet logs = $getWorkflowStaticData('global').energy_logs || [];\n\n// Add new log entry\nlogs.push(logEntry);\n\n// Keep only the last 100 entries\nif (logs.length > 100) {\n  logs = logs.slice(-100);\n}\n\n// Save updated logs\n$setWorkflowStaticData('global', { \n  energy_logs: logs,\n  last_run: timestamp,\n  last_energy_score: data.energy_score\n});\n\nreturn {\n  json: {\n    ...data,\n    log_entry: logEntry,\n    logs_count: logs.length\n  }\n};"
+      },
+      "name": "Log Energy Decisions",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1000, 700]
+    }
+  ],
+  "connections": {
+    "15-Minute Interval": {
+      "main": [
+        [
+          {
+            "node": "Get Current Home State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Current Home State": {
+      "main": [
+        [
+          {
+            "node": "Analyze Energy Situation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Energy Situation": {
+      "main": [
+        [
+          {
+            "node": "Determine Device Actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Device Actions": {
+      "main": [
+        [
+          {
+            "node": "Execute Device Actions",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Update Energy Status Entity",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log Energy Decisions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Device Actions": {
+      "main": [
+        [
+          {
+            "node": "Send Device Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": {
+    "global": {
+      "energy_logs": [],
+      "last_run": "2023-05-01T12:00:00.000Z",
+      "last_energy_score": 65
+    }
+  },
+  "tags": ["automation", "energy", "smart-home"],
+  "pinData": {}
+}

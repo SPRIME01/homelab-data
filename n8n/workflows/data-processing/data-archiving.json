@@ -1,0 +1,441 @@
+{
+  "name": "Data Archiving",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "consume",
+        "queue": "data-processing-archive",
+        "options": {
+          "contentType": "application/json"
+        }
+      },
+      "name": "RabbitMQ Input",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract message properties\nconst message = $input.item.json.messages[0];\nconst content = typeof message.content === 'string' ? JSON.parse(message.content) : message.content;\n\n// Extract archiving parameters\nconst data = content.data || {};\nconst archiveType = content.archiveType || 'standard';\nconst options = content.options || {};\nconst metadata = content.metadata || {};\nconst retentionPolicy = content.retentionPolicy || { days: 30 };\n\nreturn {\n  json: {\n    data,\n    archiveType,\n    options,\n    metadata: {\n      ...metadata,\n      timestamp: metadata.timestamp || new Date().toISOString(),\n      source: metadata.source || 'n8n-workflow',\n      archiveId: metadata.archiveId || `archive-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`\n    },\n    retentionPolicy,\n    messageId: message.properties?.messageId || `msg-${Date.now()}`,\n    originalContent: content\n  }\n};"
+      },
+      "name": "Extract Message Properties",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare data for archiving\nconst data = $input.item.json.data;\nconst metadata = $input.item.json.metadata;\nconst options = $input.item.json.options;\nconst archiveType = $input.item.json.archiveType;\n\n// Determine storage paths based on date\nconst archiveDate = new Date(metadata.timestamp);\nconst year = archiveDate.getFullYear();\nconst month = String(archiveDate.getMonth() + 1).padStart(2, '0');\nconst day = String(archiveDate.getDate()).padStart(2, '0');\nconst hour = String(archiveDate.getHours()).padStart(2, '0');\n\n// Create a hierarchical path structure for organizing archives\nconst basePath = options.basePath || 'archives';\nconst datePath = `${year}/${month}/${day}`;\nconst sourceType = metadata.source?.replace(/[^a-zA-Z0-9-_]/g, '_') || 'unknown';\n\n// Generate archive filename with metadata\nconst filename = options.filename || \n  `${sourceType}-${year}${month}${day}-${hour}${metadata.archiveId}.json`;\n\n// Create full path\nconst fullPath = `${basePath}/${sourceType}/${datePath}/${filename}`;\n\n// Create the archive object\nconst archiveObject = {\n  metadata: {\n    ...metadata,\n    archivePath: fullPath,\n    archiveType,\n    archivedAt: new Date().toISOString(),\n    version: '1.0'\n  },\n  data\n};\n\n// Compression logic if needed\nlet compressContent = options.compress || false;\nlet encryptContent = options.encrypt || false;\n\nreturn {\n  json: {\n    ...$input.item.json,\n    archivePath: fullPath,\n    archiveObject,\n    compressContent,\n    encryptContent\n  }\n};"
+      },
+      "name": "Prepare Archive",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "mode": "chooseBranch",
+        "output": "={{ $json.archiveType }}"
+      },
+      "name": "Determine Archive Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [780, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare content for file storage\nconst archiveObject = $input.item.json.archiveObject;\nconst compressContent = $input.item.json.compressContent;\nconst encryptContent = $input.item.json.encryptContent;\n\n// Convert to JSON string\nlet content = JSON.stringify(archiveObject, null, 2);\n\n// Simple Base64 encoding for demo purposes\n// In production, use proper compression and encryption libraries\nif (compressContent) {\n  // This is just a placeholder for compression\n  // In a real implementation, you would use a proper compression algorithm\n  content = Buffer.from(content).toString('base64');\n}\n\nif (encryptContent) {\n  // This is just a placeholder for encryption\n  // In a real implementation, you would use a proper encryption algorithm\n  content = `ENCRYPTED:${content}`;\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    fileContent: content,\n    contentType: compressContent ? 'application/octet-stream' : 'application/json',\n    contentEncoding: compressContent ? 'base64' : 'utf8'\n  }\n};"
+      },
+      "name": "Process File Storage",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [960, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare content for database storage\nconst archiveObject = $input.item.json.archiveObject;\nconst metadata = $input.item.json.metadata;\nconst data = $input.item.json.data;\n\n// Format for database storage\nconst dbDocument = {\n  archive_id: metadata.archiveId,\n  source: metadata.source,\n  timestamp: metadata.timestamp,\n  archived_at: new Date().toISOString(),\n  data_type: typeof data === 'object' ? 'json' : typeof data,\n  retention_expires: calculateExpiryDate($input.item.json.retentionPolicy),\n  tags: metadata.tags || [],\n  metadata: JSON.stringify(metadata),\n  content: JSON.stringify(data)\n};\n\n// Calculate expiry date based on retention policy\nfunction calculateExpiryDate(policy) {\n  const now = new Date();\n  \n  if (policy.days) {\n    now.setDate(now.getDate() + policy.days);\n  }\n  \n  if (policy.months) {\n    now.setMonth(now.getMonth() + policy.months);\n  }\n  \n  if (policy.years) {\n    now.setFullYear(now.getFullYear() + policy.years);\n  }\n  \n  return now.toISOString();\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    dbDocument\n  }\n};"
+      },
+      "name": "Process Database Storage",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [960, 400]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "operation": "upload",
+        "path": "={{ $json.archivePath }}",
+        "content": "={{ $json.fileContent }}",
+        "options": {}
+      },
+      "name": "Save to File Storage",
+      "type": "n8n-nodes-base.filesInstructions",
+      "typeVersion": 1,
+      "position": [1140, 200],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.options.dbApiUrl || \"http://archive-db-api.local/archives\" }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.ARCHIVE_DB_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={{ $json.dbDocument }}"
+            }
+          ]
+        }
+      },
+      "name": "Save to Database",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1140, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare for S3 storage\nconst archiveObject = $input.item.json.archiveObject;\nconst compressContent = $input.item.json.compressContent;\nconst encryptContent = $input.item.json.encryptContent;\nconst metadata = $input.item.json.metadata;\n\n// Convert to JSON string\nlet content = JSON.stringify(archiveObject, null, 2);\n\n// This is a mock for S3 data preparation\n// In a real implementation, you would prepare according to S3 requirements\nconst s3Data = {\n  Bucket: $input.item.json.options.s3Bucket || 'homelab-archives',\n  Key: $input.item.json.archivePath,\n  Body: content,\n  ContentType: 'application/json',\n  Metadata: {\n    'Archive-Id': metadata.archiveId,\n    'Archive-Source': metadata.source,\n    'Archive-Timestamp': metadata.timestamp,\n    'Content-Encoding': encryptContent ? 'encrypted' : (compressContent ? 'compressed' : 'identity')\n  }\n};\n\nreturn {\n  json: {\n    ...$input.item.json,\n    s3Data\n  }\n};"
+      },
+      "name": "Process S3 Storage",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [960, 600]
+    },
+    {
+      "parameters": {
+        "operation": "putObject",
+        "bucket": "={{ $json.s3Data.Bucket }}",
+        "key": "={{ $json.s3Data.Key }}",
+        "body": "={{ $json.s3Data.Body }}",
+        "options": {
+          "contentType": "={{ $json.s3Data.ContentType }}",
+          "metadata": "={{ $json.s3Data.Metadata }}"
+        }
+      },
+      "name": "Save to S3",
+      "type": "n8n-nodes-base.s3",
+      "typeVersion": 1,
+      "position": [1140, 600],
+      "credentials": {
+        "s3": {
+          "id": "2",
+          "name": "S3 Archive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 0
+      },
+      "name": "Merge Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1320, 300]
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "archiveId",
+              "value": "={{ $json.metadata.archiveId }}"
+            },
+            {
+              "name": "archiveType",
+              "value": "={{ $json.archiveType }}"
+            },
+            {
+              "name": "archivePath",
+              "value": "={{ $json.archivePath }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ $json.metadata.timestamp }}"
+            }
+          ],
+          "boolean": [
+            {
+              "name": "success",
+              "value": true
+            }
+          ],
+          "object": [
+            {
+              "name": "metadata",
+              "value": "={{ $json.metadata }}"
+            },
+            {
+              "name": "retentionPolicy",
+              "value": "={{ $json.retentionPolicy }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Format Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [1500, 300]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "data-processing-results",
+        "routingKey": "archive.complete",
+        "content": "={{ JSON.stringify($json) }}",
+        "options": {
+          "persistent": true,
+          "contentType": "application/json",
+          "headers": {
+            "header": [
+              {
+                "name": "archive-id",
+                "value": "={{ $json.archiveId }}"
+              },
+              {
+                "name": "archive-type",
+                "value": "={{ $json.archiveType }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Result",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [1680, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.options.webhookUrl || \"http://archive-notifications.local/archive-complete\" }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Archive-ID",
+              "value": "={{ $json.archiveId }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={{ {\n  \"archiveId\": $json.archiveId,\n  \"timestamp\": $json.timestamp,\n  \"type\": $json.archiveType,\n  \"path\": $json.archivePath,\n  \"metadata\": $json.metadata,\n  \"retention\": $json.retentionPolicy\n} }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Send Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1860, 300]
+    }
+  ],
+  "connections": {
+    "RabbitMQ Input": {
+      "main": [
+        [
+          {
+            "node": "Extract Message Properties",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Message Properties": {
+      "main": [
+        [
+          {
+            "node": "Prepare Archive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Archive": {
+      "main": [
+        [
+          {
+            "node": "Determine Archive Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Archive Type": {
+      "standard": [
+        [
+          {
+            "node": "Process File Storage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "database": [
+        [
+          {
+            "node": "Process Database Storage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "s3": [
+        [
+          {
+            "node": "Process S3 Storage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process File Storage": {
+      "main": [
+        [
+          {
+            "node": "Save to File Storage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Database Storage": {
+      "main": [
+        [
+          {
+            "node": "Save to Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to File Storage": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Database": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process S3 Storage": {
+      "main": [
+        [
+          {
+            "node": "Save to S3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to S3": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Results": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Result": {
+      "main": [
+        [
+          {
+            "node": "Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Result": {
+      "main": [
+        [
+          {
+            "node": "Send Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": {},
+  "tags": ["data-processing", "archiving"],
+  "pinData": {}
+}

@@ -1,0 +1,263 @@
+{
+  "name": "Log Analysis & Anomaly Detection",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "consume",
+        "queue": "homelab-logs",
+        "consumeOptions": {
+          "noAck": false,
+          "maxMessages": 10,
+          "headerFiltering": true,
+          "headerFilters": {
+            "filter": [
+              {
+                "name": "log-level",
+                "value": "error",
+                "matchType": "equals"
+              }
+            ]
+          }
+        }
+      },
+      "name": "RabbitMQ - Receive Logs",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process incoming log messages\nconst messages = $input.item.json.messages || [];\nconst logData = [];\n\ntry {\n  for (const message of messages) {\n    const content = typeof message.content === 'string' \n      ? JSON.parse(message.content) \n      : message.content;\n\n    const timestamp = content.timestamp || new Date().toISOString();\n    const service = content.service || 'unknown';\n    const level = content.level || 'info';\n    const messageText = content.message || '';\n\n    logData.push({\n      timestamp,\n      service,\n      level,\n      message: messageText\n    });\n  }\n\n  return {\n    json: {\n      logData,\n      summary: {\n        total: logData.length,\n        errorCount: logData.filter(log => log.level === 'error').length\n      }\n    }\n  };\n} catch (error) {\n  return {\n    json: {\n      error: 'Failed to process log messages',\n      errorDetails: error.message\n    }\n  };\n}"
+      },
+      "name": "Process Log Messages",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Analyze logs for anomalies\nconst logData = $input.item.json.logData || [];\nconst errorPatterns = ['timeout', 'connection refused', 'out of memory'];\nconst anomalies = [];\n\nfor (const log of logData) {\n  for (const pattern of errorPatterns) {\n    if (log.message.includes(pattern)) {\n      anomalies.push({\n        ...log,\n        pattern\n      });\n    }\n  }\n}\n\nreturn {\n  json: {\n    anomalies,\n    errorPatterns,\n    summary: $input.item.json.summary,\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "name": "Analyze Logs",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.anomalies.length }}",
+              "value2": 0,
+              "operation": "notEqual"
+            }
+          ]
+        }
+      },
+      "name": "Anomalies Detected?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [800, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://influxdb.local:8086/api/v2/write",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "queryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "org",
+              "value": "homelab"
+            },
+            {
+              "name": "bucket",
+              "value": "log_analysis"
+            },
+            {
+              "name": "precision",
+              "value": "ns"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ \nconst entries = [];\nconst ts = new Date($json.timestamp).getTime() * 1000000;\n\nentries.push(`log_analysis,source=homelab total_logs=${$json.summary.total},error_count=${$json.summary.errorCount} ${ts}`);\n\nfor (const anomaly of $json.anomalies) {\n  entries.push(`log_analysis,source=homelab,service=${anomaly.service} pattern=\"${anomaly.pattern}\" ${ts}`);\n}\n\nreturn entries.join('\\n');\n}}"
+            }
+          ]
+        }
+      },
+      "name": "Store Logs in InfluxDB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [800, 500],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "3",
+          "name": "InfluxDB Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "homelab-notifications",
+        "routingKey": "system.logs",
+        "content": "={{ JSON.stringify({\n  \"title\": \"Log Anomalies Detected\",\n  \"message\": `${$json.anomalies.length} log anomalies detected across ${new Set($json.anomalies.map(a => a.service)).size} services`,\n  \"severity\": \"warning\",\n  \"component\": \"log-analyzer\",\n  \"details\": {\n    \"timestamp\": $json.timestamp,\n    \"anomalies\": $json.anomalies.map(a => a.message),\n    \"summary\": {\n      \"total_logs\": $json.summary.total,\n      \"error_count\": $json.summary.errorCount,\n      \"patterns_found\": $json.errorPatterns\n    }\n  },\n  \"actions\": [\n    { \"name\": \"View Logs\", \"url\": \"/admin/logs\" }\n  ]\n}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true
+        }
+      },
+      "name": "Send Anomaly Alert",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [1000, 200],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/states/sensor.log_analysis_status",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"state\": \"{{ $json.anomalies.length > 0 ? 'anomalies_detected' : 'normal' }}\",\n  \"attributes\": {\n    \"friendly_name\": \"Log Analysis Status\",\n    \"icon\": \"{{ $json.anomalies.length > 0 ? 'mdi:alert-circle' : 'mdi:check-circle' }}\",\n    \"total_analyzed\": {{ $json.summary.total }},\n    \"error_count\": {{ $json.summary.errorCount || 0 }},\n    \"anomaly_count\": {{ $json.anomalies.length }},\n    \"detected_patterns\": {{ $json.errorPatterns }},\n    \"last_analyzed\": \"{{ $json.timestamp }}\"\n  }\n}"
+            }
+          ]
+        }
+      },
+      "name": "Update Home Assistant Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1000, 400]
+    }
+  ],
+  "connections": {
+    "RabbitMQ - Receive Logs": {
+      "main": [
+        [
+          {
+            "node": "Process Log Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Log Messages": {
+      "main": [
+        [
+          {
+            "node": "Analyze Logs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Store Logs in InfluxDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Logs": {
+      "main": [
+        [
+          {
+            "node": "Anomalies Detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anomalies Detected?": {
+      "true": [
+        [
+          {
+            "node": "Send Anomaly Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Update Home Assistant Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Anomaly Alert": {
+      "main": [
+        [
+          {
+            "node": "Update Home Assistant Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": {
+    "global": {
+      "errorCounts": {},
+      "errorRates": {},
+      "lastAnalysisTime": 1689418800000
+    }
+  },
+  "tags": ["maintenance", "monitoring", "log-analysis"],
+  "pinData": {}
+}

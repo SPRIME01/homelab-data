@@ -1,0 +1,310 @@
+{
+  "name": "Message Transformation",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "consume",
+        "queue": "data-processing-transform",
+        "options": {
+          "contentType": "application/json"
+        }
+      },
+      "name": "RabbitMQ",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract message properties\nconst message = $input.item.json.messages[0];\nconst content = typeof message.content === 'string' ? JSON.parse(message.content) : message.content;\n\n// Extract transform parameters\nconst sourceFormat = content.sourceFormat || 'json';\nconst targetFormat = content.targetFormat || 'json';\nconst data = content.data;\nconst transformOptions = content.options || {};\n\nreturn {\n  json: {\n    sourceFormat,\n    targetFormat,\n    data,\n    transformOptions,\n    timestamp: new Date().toISOString(),\n    messageId: message.properties?.messageId || `msg-${Date.now()}`\n  }\n};"
+      },
+      "name": "Extract Message Properties",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "mode": "chooseBranch",
+        "output": "={{$json.sourceFormat + '_to_' + $json.targetFormat}}"
+      },
+      "name": "Determine Transformation Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Transform JSON to XML\nconst data = $input.item.json.data;\nconst options = $input.item.json.transformOptions;\n\n// Configure the XML root element\nconst rootElement = options.rootElement || 'root';\n\n// Function to convert JSON to XML\nfunction jsonToXml(obj, rootName) {\n  let xml = `<${rootName}>`;\n  \n  for (const prop in obj) {\n    if (obj.hasOwnProperty(prop)) {\n      if (typeof obj[prop] === 'object' && obj[prop] !== null) {\n        if (Array.isArray(obj[prop])) {\n          // Handle array elements\n          obj[prop].forEach(item => {\n            // Use singular form of the property name for array items\n            const singularName = prop.endsWith('s') ? prop.slice(0, -1) : `${prop}-item`;\n            xml += jsonToXml(item, singularName);\n          });\n        } else {\n          // Handle nested objects\n          xml += jsonToXml(obj[prop], prop);\n        }\n      } else {\n        // Handle primitive values\n        xml += `<${prop}>${obj[prop]}</${prop}>`;\n      }\n    }\n  }\n  \n  xml += `</${rootName}>`;\n  return xml;\n}\n\n// Perform the transformation\nconst xmlResult = jsonToXml(data, rootElement);\n\n// Return transformed data\nreturn {\n  json: {\n    ...$input.item.json,\n    transformedData: xmlResult,\n    transformationComplete: true\n  }\n};"
+      },
+      "name": "JSON to XML",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [780, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Transform JSON to CSV\nconst data = $input.item.json.data;\nconst options = $input.item.json.transformOptions;\n\n// Configure CSV options\nconst delimiter = options.delimiter || ',';\nconst includeHeaders = options.includeHeaders !== false;\n\n// Function to convert JSON to CSV\nfunction jsonToCsv(items) {\n  if (!Array.isArray(items) || items.length === 0) {\n    // If not an array or empty, wrap in array for processing\n    items = Array.isArray(items) ? items : [items];\n    if (items.length === 0) return '';\n  }\n  \n  // Get all possible headers (column names)\n  const headers = new Set();\n  items.forEach(item => {\n    if (typeof item === 'object' && item !== null) {\n      Object.keys(item).forEach(key => headers.add(key));\n    }\n  });\n  \n  const headerRow = Array.from(headers);\n  let csv = includeHeaders ? headerRow.join(delimiter) + '\\n' : '';\n  \n  // Add data rows\n  items.forEach(item => {\n    const row = headerRow.map(header => {\n      let value = item[header];\n      \n      // Handle special values\n      if (value === undefined || value === null) return '';\n      if (typeof value === 'object') value = JSON.stringify(value);\n      \n      // Escape quotes and wrap in quotes if contains delimiter or newline\n      value = String(value).replace(/\"/g, '\"\"');\n      if (value.includes(delimiter) || value.includes('\\n')) {\n        value = `\"${value}\"`;\n      }\n      \n      return value;\n    });\n    \n    csv += row.join(delimiter) + '\\n';\n  });\n  \n  return csv;\n}\n\n// Perform the transformation\nconst csvResult = jsonToCsv(data);\n\n// Return transformed data\nreturn {\n  json: {\n    ...$input.item.json,\n    transformedData: csvResult,\n    transformationComplete: true\n  }\n};"
+      },
+      "name": "JSON to CSV",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [780, 240]
+    },
+    {
+      "parameters": {
+        "xmlData": "={{ $json.data }}",
+        "options": {}
+      },
+      "name": "XML to JSON",
+      "type": "n8n-nodes-base.xml",
+      "typeVersion": 1,
+      "position": [780, 380]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Transform CSV to JSON\nconst data = $input.item.json.data;\nconst options = $input.item.json.transformOptions;\n\n// Configure CSV options\nconst delimiter = options.delimiter || ',';\nconst hasHeaders = options.hasHeaders !== false;\n\n// Function to convert CSV to JSON\nfunction csvToJson(csv) {\n  // Split input into rows\n  const rows = csv.split(/\\r?\\n/).filter(row => row.trim());\n  if (rows.length === 0) return [];\n  \n  // Parse the header row if present\n  let headers;\n  let startIndex = 0;\n  \n  if (hasHeaders) {\n    headers = rows[0].split(delimiter).map(header => header.trim());\n    startIndex = 1;\n  } else {\n    // Generate column names if no headers\n    const columnCount = rows[0].split(delimiter).length;\n    headers = Array.from({ length: columnCount }, (_, i) => `column${i + 1}`);\n  }\n  \n  // Parse data rows\n  const result = [];\n  for (let i = startIndex; i < rows.length; i++) {\n    const row = rows[i];\n    const values = [];\n    let currentValue = '';\n    let inQuotes = false;\n    \n    // Parse values with proper handling of quoted fields\n    for (let j = 0; j < row.length; j++) {\n      const char = row[j];\n      \n      if (char === '\"') {\n        if (inQuotes && row[j + 1] === '\"') {\n          // Handle escaped quotes\n          currentValue += '\"';\n          j++;\n        } else {\n          // Toggle quote state\n          inQuotes = !inQuotes;\n        }\n      } else if (char === delimiter && !inQuotes) {\n        // End of field\n        values.push(currentValue);\n        currentValue = '';\n      } else {\n        currentValue += char;\n      }\n    }\n    \n    // Add the last value\n    values.push(currentValue);\n    \n    // Create object from values\n    const obj = {};\n    for (let j = 0; j < headers.length; j++) {\n      if (j < values.length) {\n        obj[headers[j]] = values[j];\n      }\n    }\n    \n    result.push(obj);\n  }\n  \n  return result;\n}\n\n// Perform the transformation\nconst jsonResult = csvToJson(data);\n\n// Return transformed data\nreturn {\n  json: {\n    ...$input.item.json,\n    transformedData: jsonResult,\n    transformationComplete: true\n  }\n};"
+      },
+      "name": "CSV to JSON",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [780, 520]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Basic passthroughs or other formats\nlet transformedData = $input.item.json.data;\nconst sourceFormat = $input.item.json.sourceFormat;\nconst targetFormat = $input.item.json.targetFormat;\n\n// If formats are the same (passthrough case), just ensure proper format\nif (sourceFormat === targetFormat) {\n  if (sourceFormat === 'json' && typeof transformedData === 'string') {\n    try {\n      transformedData = JSON.parse(transformedData);\n    } catch (e) {\n      // If parsing fails, keep as is\n    }\n  } else if (sourceFormat !== 'json' && typeof transformedData !== 'string') {\n    transformedData = JSON.stringify(transformedData);\n  }\n}\n\n// Return transformed data\nreturn {\n  json: {\n    ...$input.item.json,\n    transformedData,\n    transformationComplete: true,\n    note: 'Direct passthrough or unsupported transformation'\n  }\n};"
+      },
+      "name": "Other Transformations",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [780, 660]
+    },
+    {
+      "parameters": {
+        "batchSize": 0,
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "sourceFormat",
+              "value": "={{ $json.sourceFormat }}"
+            },
+            {
+              "name": "targetFormat",
+              "value": "={{ $json.targetFormat }}"
+            },
+            {
+              "name": "messageId",
+              "value": "={{ $json.messageId }}"
+            }
+          ],
+          "object": [
+            {
+              "name": "transformedData",
+              "value": "={{ $json.transformedData }}"
+            },
+            {
+              "name": "originalData",
+              "value": "={{ $json.data }}"
+            },
+            {
+              "name": "options",
+              "value": "={{ $json.transformOptions }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Format Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [980, 300]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "data-processing-results",
+        "routingKey": "transformation.complete",
+        "content": "={{ JSON.stringify($json) }}",
+        "options": {
+          "persistent": true,
+          "contentType": "application/json",
+          "headers": {
+            "header": [
+              {
+                "name": "source-format",
+                "value": "={{ $json.sourceFormat }}"
+              },
+              {
+                "name": "target-format",
+                "value": "={{ $json.targetFormat }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Result",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [1160, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "RabbitMQ": {
+      "main": [
+        [
+          {
+            "node": "Extract Message Properties",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Message Properties": {
+      "main": [
+        [
+          {
+            "node": "Determine Transformation Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Transformation Type": {
+      "json_to_xml": [
+        [
+          {
+            "node": "JSON to XML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "json_to_csv": [
+        [
+          {
+            "node": "JSON to CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "xml_to_json": [
+        [
+          {
+            "node": "XML to JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "csv_to_json": [
+        [
+          {
+            "node": "CSV to JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "default": [
+        [
+          {
+            "node": "Other Transformations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "JSON to XML": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "JSON to CSV": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "XML to JSON": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CSV to JSON": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Other Transformations": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Result": {
+      "main": [
+        [
+          {
+            "node": "Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": null,
+  "tags": ["data-processing", "transformation"],
+  "pinData": {}
+}

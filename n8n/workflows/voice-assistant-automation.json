@@ -1,0 +1,647 @@
+{
+  "name": "Voice Assistant Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "consume",
+        "queue": "home-assistant-voice-commands",
+        "consumeOptions": {
+          "noAck": false,
+          "maxMessages": 1
+        }
+      },
+      "name": "RabbitMQ Enhanced",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract voice command and context from RabbitMQ message\nconst data = $input.item.json.messages[0];\nlet command = '';\nlet deviceInfo = {};\nlet sessionId = '';\nlet contextData = {};\nlet userId = '';\n\ntry {\n  // Parse the message content\n  const content = typeof data.content === 'string' ? JSON.parse(data.content) : data.content;\n  \n  command = content.command || '';\n  deviceInfo = content.device || {};\n  sessionId = content.session_id || `session-${Date.now()}`;\n  userId = content.user_id || 'unknown';\n  \n  // Extract conversation context if available\n  contextData = content.context || {};\n  \n  return {\n    json: {\n      command,\n      deviceInfo,\n      sessionId,\n      contextData,\n      userId,\n      timestamp: new Date().toISOString(),\n      messageId: data.properties?.messageId || `msg-${Date.now()}`,\n      rawMessage: content\n    }\n  };\n} catch (error) {\n  console.log('Error parsing voice command:', error);\n  return {\n    json: {\n      error: 'Failed to parse voice command',\n      errorDetail: error.message,\n      rawData: data\n    }\n  };\n}"
+      },
+      "name": "Extract Command",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.error }}",
+              "operation": "exists"
+            }
+          ]
+        }
+      },
+      "name": "Is Error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "home-assistant-responses",
+        "routingKey": "voice.error",
+        "content": "={{ JSON.stringify({session_id: $json.sessionId || 'unknown', response: 'I\\'m sorry, but I couldn\\'t understand that request.', error: $json.error, error_detail: $json.errorDetail}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true,
+          "headers": {
+            "header": [
+              {
+                "name": "response-type",
+                "value": "error"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Error Response",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [800, 200],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "command",
+              "value": "={{ $json.command }}"
+            },
+            {
+              "name": "sessionId",
+              "value": "={{ $json.sessionId }}"
+            }
+          ],
+          "object": [
+            {
+              "name": "context",
+              "value": "={{ $json.contextData }}"
+            },
+            {
+              "name": "device",
+              "value": "={{ $json.deviceInfo }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Prepare NLU Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [800, 400]
+    },
+    {
+      "parameters": {
+        "model": "nlu-intent-model",
+        "inputDataField": "command",
+        "inputName": "input_text",
+        "outputName": "intent_output",
+        "inputDataType": "STRING",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "name": "Triton NLU",
+      "type": "n8n-nodes-triton.triton",
+      "typeVersion": 1,
+      "position": [1000, 400],
+      "credentials": {
+        "tritonApi": {
+          "id": "2",
+          "name": "Triton Inference Server"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process NLU output and extract intent and entities\nconst nluOutput = $input.item.json.inferenceResult;\nconst command = $input.item.json.command;\nconst context = $input.item.json.context || {};\n\ntry {\n  // Get intent and confidence\n  const intent = nluOutput.intent || '';\n  const confidence = nluOutput.confidence || 0;\n  const entities = nluOutput.entities || [];\n  \n  // Parse entities into a more usable format\n  const parsedEntities = {};\n  entities.forEach(entity => {\n    parsedEntities[entity.entity_type] = entity.value;\n  });\n  \n  // Check if we need more information - if intent recognized but missing required entities\n  let needsMoreInfo = false;\n  let missingEntity = '';\n  \n  if (intent === 'turn_on_device' && !parsedEntities.device) {\n    needsMoreInfo = true;\n    missingEntity = 'device';\n  } else if (intent === 'set_temperature' && !parsedEntities.temperature) {\n    needsMoreInfo = true;\n    missingEntity = 'temperature';\n  }\n  \n  // Build the result object\n  return {\n    json: {\n      ...context,\n      command,\n      intent,\n      confidence,\n      entities: parsedEntities,\n      allEntities: entities,\n      needsMoreInfo,\n      missingEntity,\n      timestamp: new Date().toISOString(),\n      sessionId: $input.item.json.sessionId,\n      matchedIntent: confidence > 0.7 // Consider it a match if confidence > 70%\n    }\n  };\n} catch (error) {\n  return {\n    json: {\n      error: 'Failed to process NLU output',\n      errorDetail: error.message,\n      command,\n      sessionId: $input.item.json.sessionId,\n      rawOutput: nluOutput\n    }\n  };\n}"
+      },
+      "name": "Process Intent",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1200, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.needsMoreInfo }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Needs More Info?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1400, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate follow-up question to get missing information\nconst missingEntity = $input.item.json.missingEntity;\nconst intent = $input.item.json.intent;\n\nlet question = 'Could you provide more information?';\n\nswitch (missingEntity) {\n  case 'device':\n    question = 'Which device would you like to control?';\n    break;\n  case 'temperature':\n    question = 'What temperature would you like to set?';\n    break;\n  case 'time':\n    question = 'What time would you like to set this for?';\n    break;\n  case 'duration':\n    question = 'For how long?';\n    break;\n  default:\n    question = 'Could you be more specific with your request?';\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    responseType: 'follow_up',\n    response: question,\n    awaitingEntity: missingEntity,\n    conversationActive: true\n  }\n};"
+      },
+      "name": "Generate Follow-up",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1600, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.intent }}",
+              "value2": "turn_on_device",
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Is Turn On Intent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1600, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare Home Assistant service call for turning on a device\nconst entities = $input.item.json.entities;\nconst deviceName = entities.device;\n\n// Map common device names to entity IDs\nconst deviceMapping = {\n  'living room lights': 'light.living_room',\n  'kitchen lights': 'light.kitchen',\n  'bedroom lights': 'light.bedroom',\n  'tv': 'media_player.living_room_tv',\n  'thermostat': 'climate.home',\n  'fan': 'fan.living_room',\n  // Add more mappings as needed\n};\n\n// Try to find the entity_id\nlet entityId = deviceMapping[deviceName.toLowerCase()];\n\n// If not found in mapping, try to construct a generic entity ID\nif (!entityId) {\n  // Make a best guess based on the device type\n  if (deviceName.toLowerCase().includes('light')) {\n    entityId = `light.${deviceName.toLowerCase().replace(' ', '_')}`;\n  } else if (deviceName.toLowerCase().includes('switch')) {\n    entityId = `switch.${deviceName.toLowerCase().replace(' ', '_')}`;\n  } else {\n    entityId = `light.${deviceName.toLowerCase().replace(' ', '_')}`;\n  }\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    action: 'call_service',\n    domain: entityId.split('.')[0],\n    service: 'turn_on',\n    serviceData: {\n      entity_id: entityId\n    },\n    responseType: 'confirmation',\n    response: `Turning on ${deviceName}.`,\n    targetEntityId: entityId\n  }\n};"
+      },
+      "name": "Process Turn On",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1800, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.intent }}",
+              "value2": "set_temperature",
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Is Set Temperature?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1800, 600]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare Home Assistant service call for setting temperature\nconst entities = $input.item.json.entities;\nconst temperature = entities.temperature;\n\n// Default to main thermostat if not specified\nconst entityId = 'climate.home';\n\nreturn {\n  json: {\n    ...$input.item.json,\n    action: 'call_service',\n    domain: 'climate',\n    service: 'set_temperature',\n    serviceData: {\n      entity_id: entityId,\n      temperature: parseFloat(temperature)\n    },\n    responseType: 'confirmation',\n    response: `Setting temperature to ${temperature} degrees.`,\n    targetEntityId: entityId\n  }\n};"
+      },
+      "name": "Process Temperature",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2000, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate fallback response for unrecognized intents\nconst command = $input.item.json.command;\nconst confidence = $input.item.json.confidence || 0;\n\nlet response = \"I'm sorry, I don't understand what you want me to do.\";\n\nif (confidence > 0.3) {\n  // We have some idea but not confident enough\n  response = \"I'm not sure what you're asking for. Could you rephrase that?\";\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    responseType: 'unknown_intent',\n    response,\n    action: 'unknown'\n  }\n};"
+      },
+      "name": "Unknown Intent",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2000, 700]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://homeassistant.local:8123/api/services/{{ $json.domain }}/{{ $json.service }}",
+        "allowUnauthorizedCerts": true,
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={{ $json.serviceData }}"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "follow": true
+          },
+          "response": {
+            "fullResponse": true
+          },
+          "proxy": {}
+        }
+      },
+      "name": "Call Home Assistant",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2200, 500],
+      "notesInFlow": true,
+      "notes": "Execute action in Home Assistant"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Enrich the response with operation result\nconst statusCode = $input.item.json.statusCode;\n\nlet response = $input.item.json.response;\nlet success = statusCode >= 200 && statusCode < 300;\n\nif (!success) {\n  response = `I'm sorry, there was a problem with that request. ${response}`;\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    actionSuccess: success,\n    actionStatusCode: statusCode,\n    enhancedResponse: success ? response : `I encountered an issue: ${$input.item.json.statusText}`\n  }\n};"
+      },
+      "name": "Process Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2400, 500]
+    },
+    {
+      "parameters": {
+        "mode": "chooseBranch",
+        "output": "={{ $json.responseType }}"
+      },
+      "name": "Response Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [2400, 700]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate natural language confirmation response\nconst actionSuccess = $input.item.json.actionSuccess;\nconst device = $input.item.json.entities?.device;\nconst intent = $input.item.json.intent;\n\nlet response;\n\nif (actionSuccess) {\n  if (intent === 'turn_on_device' && device) {\n    response = `I've turned on the ${device}.`;\n  } else if (intent === 'set_temperature') {\n    const temp = $input.item.json.entities?.temperature;\n    response = `I've set the temperature to ${temp} degrees.`;\n  } else {\n    response = $input.item.json.enhancedResponse || 'The action was completed successfully.';\n  }\n} else {\n  response = $input.item.json.enhancedResponse || \"I'm sorry, I couldn't complete that action.\";\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    finalResponse: response,\n    conversationActive: false\n  }\n};"
+      },
+      "name": "Confirmation Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2600, 600]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process follow-up response\nconst followUpQuestion = $input.item.json.response;\n\nreturn {\n  json: {\n    ...$input.item.json,\n    finalResponse: followUpQuestion,\n    conversationActive: true\n  }\n};"
+      },
+      "name": "Follow-up Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2600, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate response for unknown intent\nconst response = $input.item.json.response;\n\nreturn {\n  json: {\n    ...$input.item.json,\n    finalResponse: response,\n    conversationActive: false\n  }\n};"
+      },
+      "name": "Unknown Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2600, 800]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Update conversation context in database\nconst sessionId = $input.item.json.sessionId;\nconst intent = $input.item.json.intent;\nconst entities = $input.item.json.entities || {};\nconst conversationActive = $input.item.json.conversationActive;\nconst awaitingEntity = $input.item.json.awaitingEntity;\n\n// This would typically save to a database\n// For demo, we'll just format what would be saved\nconst contextToSave = {\n  sessionId,\n  lastIntent: intent,\n  entities,\n  lastTimestamp: new Date().toISOString(),\n  active: conversationActive,\n  awaitingEntity,\n  lastResponse: $input.item.json.finalResponse\n};\n\nreturn {\n  json: {\n    ...$input.item.json,\n    contextUpdated: true,\n    savedContext: contextToSave\n  }\n};"
+      },
+      "name": "Update Context",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2800, 600]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "home-assistant-responses",
+        "routingKey": "voice.response",
+        "content": "={{ JSON.stringify({\n  session_id: $json.sessionId,\n  response: $json.finalResponse,\n  conversation_active: $json.conversationActive,\n  intent: $json.intent,\n  confidence: $json.confidence,\n  device_info: $json.device,\n  timestamp: new Date().toISOString()\n}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true,
+          "headers": {
+            "header": [
+              {
+                "name": "response-type",
+                "value": "={{ $json.responseType }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Response",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [3000, 600],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "RabbitMQ Enhanced": {
+      "main": [
+        [
+          {
+            "node": "Extract Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Command": {
+      "main": [
+        [
+          {
+            "node": "Is Error?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Error?": {
+      "true": [
+        [
+          {
+            "node": "Send Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Prepare NLU Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare NLU Input": {
+      "main": [
+        [
+          {
+            "node": "Triton NLU",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triton NLU": {
+      "main": [
+        [
+          {
+            "node": "Process Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Intent": {
+      "main": [
+        [
+          {
+            "node": "Needs More Info?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs More Info?": {
+      "true": [
+        [
+          {
+            "node": "Generate Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Is Turn On Intent?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Response Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Turn On Intent?": {
+      "true": [
+        [
+          {
+            "node": "Process Turn On",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Is Set Temperature?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Turn On": {
+      "main": [
+        [
+          {
+            "node": "Call Home Assistant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Set Temperature?": {
+      "true": [
+        [
+          {
+            "node": "Process Temperature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Unknown Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Temperature": {
+      "main": [
+        [
+          {
+            "node": "Call Home Assistant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unknown Intent": {
+      "main": [
+        [
+          {
+            "node": "Response Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Home Assistant": {
+      "main": [
+        [
+          {
+            "node": "Process Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Response": {
+      "main": [
+        [
+          {
+            "node": "Response Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Response Type": {
+      "follow_up": [
+        [
+          {
+            "node": "Follow-up Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "confirmation": [
+        [
+          {
+            "node": "Confirmation Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "unknown_intent": [
+        [
+          {
+            "node": "Unknown Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirmation Response": {
+      "main": [
+        [
+          {
+            "node": "Update Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Follow-up Response": {
+      "main": [
+        [
+          {
+            "node": "Update Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unknown Response": {
+      "main": [
+        [
+          {
+            "node": "Update Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Context": {
+      "main": [
+        [
+          {
+            "node": "Send Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler-workflow"
+  },
+  "staticData": {
+    "conversationContexts": {}
+  },
+  "tags": ["voice", "automation", "NLU", "home assistant"],
+  "pinData": {}
+}

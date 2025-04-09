@@ -1,0 +1,532 @@
+{
+  "name": "Predictive Maintenance",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "consume",
+        "queue": "home-assistant-sensor-data",
+        "consumeOptions": {
+          "noAck": false,
+          "maxMessages": 5,
+          "headerFiltering": true,
+          "headerFilters": {
+            "filter": [
+              {
+                "name": "data-type",
+                "value": "sensor",
+                "matchType": "equals"
+              }
+            ]
+          }
+        }
+      },
+      "name": "RabbitMQ - Receive Sensor Data",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process and group incoming sensor data\nconst messages = $input.item.json.messages || [];\nconst sensorData = [];\n\n// Track unique device types\nconst deviceTypes = new Set();\n\ntry {\n  // Process each message\n  for (const message of messages) {\n    const content = typeof message.content === 'string' \n      ? JSON.parse(message.content) \n      : message.content;\n\n    // Extract basic metadata\n    const entityId = content.entity_id || 'unknown';\n    const domain = entityId.split('.')[0] || 'unknown';\n    const deviceType = content.device_type || domain;\n    const timestamp = content.timestamp || new Date().toISOString();\n    \n    deviceTypes.add(deviceType);\n    \n    // Extract the sensor value and attributes\n    const value = content.state;\n    const attributes = content.attributes || {};\n    \n    // Create a standardized data format\n    sensorData.push({\n      entity_id: entityId,\n      device_type: deviceType,\n      domain: domain,\n      timestamp: timestamp,\n      value: value,\n      unit: attributes.unit_of_measurement || '',\n      min_value: attributes.min || null,\n      max_value: attributes.max || null,\n      metadata: {\n        friendly_name: attributes.friendly_name || entityId,\n        device_class: attributes.device_class || null,\n        location: content.location || 'unknown'\n      }\n    });\n  }\n  \n  // Group data by device type for easier processing\n  const groupedData = {};\n  for (const deviceType of deviceTypes) {\n    groupedData[deviceType] = sensorData.filter(s => s.device_type === deviceType);\n  }\n  \n  return {\n    json: {\n      timestamp: new Date().toISOString(),\n      message_count: messages.length,\n      device_types: Array.from(deviceTypes),\n      data_points: sensorData.length,\n      grouped_data: groupedData,\n      all_data: sensorData\n    }\n  };\n  \n} catch (error) {\n  return {\n    json: {\n      error: 'Failed to process sensor data',\n      error_details: error.message,\n      timestamp: new Date().toISOString()\n    }\n  };\n}"
+      },
+      "name": "Process Sensor Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.error }}",
+              "operation": "exists"
+            }
+          ]
+        }
+      },
+      "name": "Is Error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://observability-stack.monitoring.svc.cluster.local:8086/api/v2/write?org=homelab&bucket=sensor_errors&precision=ns",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Token {{$env.INFLUXDB_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "=sensor_error,source=n8n,error=\"{{ $json.error }}\" message=\"{{ $json.error_details }}\" {{ Date.now() * 1000000 }}"
+            }
+          ]
+        }
+      },
+      "name": "Log Error to InfluxDB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [800, 200]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "home-assistant-notifications",
+        "routingKey": "error.predictive-maintenance",
+        "content": "={{ JSON.stringify({error: $json.error, details: $json.error_details, timestamp: $json.timestamp}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true
+        }
+      },
+      "name": "Send Error Notification",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [1000, 200],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Preprocess data for anomaly detection\nconst groupedData = $input.item.json.grouped_data || {};\nconst deviceTypes = $input.item.json.device_types || [];\nconst timestamp = $input.item.json.timestamp;\n\n// Configuration for different sensor types\nconst sensorConfigs = {\n  temperature: {\n    modelName: 'temperature-anomaly-detection',\n    inputName: 'temperature_data',\n    outputName: 'anomaly_scores',\n    preprocessing: (data) => {\n      return data.map(d => parseFloat(d.value) || 0);\n    }\n  },\n  humidity: {\n    modelName: 'humidity-anomaly-detection',\n    inputName: 'humidity_data',\n    outputName: 'anomaly_scores',\n    preprocessing: (data) => {\n      return data.map(d => parseFloat(d.value) || 0);\n    }\n  },\n  power: {\n    modelName: 'power-consumption-anomaly',\n    inputName: 'power_data',\n    outputName: 'anomaly_scores',\n    preprocessing: (data) => {\n      return data.map(d => parseFloat(d.value) || 0);\n    }\n  },\n  vibration: {\n    modelName: 'vibration-anomaly-detection',\n    inputName: 'vibration_data',\n    outputName: 'anomaly_scores',\n    preprocessing: (data) => {\n      return data.map(d => {\n        const val = parseFloat(d.value) || 0;\n        return [val, d.metadata.frequency || 0];\n      });\n    }\n  },\n  default: {\n    modelName: 'general-anomaly-detection',\n    inputName: 'sensor_data',\n    outputName: 'anomaly_scores',\n    preprocessing: (data) => {\n      return data.map(d => parseFloat(d.value) || 0);\n    }\n  }\n};\n\n// Process each device type\nconst preprocessedData = {};\nfor (const deviceType of deviceTypes) {\n  const data = groupedData[deviceType] || [];\n  \n  // Skip if no data\n  if (data.length === 0) continue;\n  \n  // Get config for this type or use default\n  const config = sensorConfigs[deviceType.toLowerCase()] || sensorConfigs.default;\n  \n  // Preprocess the data according to model requirements\n  const processedInput = config.preprocessing(data);\n  \n  preprocessedData[deviceType] = {\n    modelName: config.modelName,\n    inputName: config.inputName,\n    outputName: config.outputName,\n    data: processedInput,\n    originalData: data,\n    timestamp: timestamp\n  };\n}\n\nreturn {\n  json: {\n    preprocessedData,\n    deviceTypes,\n    timestamp\n  }\n};"
+      },
+      "name": "Preprocess for Anomaly Detection",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [800, 400]
+    },
+    {
+      "parameters": {
+        "mode": "parallel",
+        "items": "={{ Object.entries($json.preprocessedData).map(([deviceType, config]) => ({ deviceType, ...config })) }}"
+      },
+      "name": "Process Each Device Type",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [1000, 400]
+    },
+    {
+      "parameters": {
+        "model": "={{ $json.modelName }}",
+        "inputDataField": "data",
+        "inputName": "={{ $json.inputName }}",
+        "outputName": "={{ $json.outputName }}",
+        "inputDataType": "FP32",
+        "options": {
+          "timeout": 30000,
+          "resultFieldName": "anomalyScores"
+        }
+      },
+      "name": "Triton Anomaly Detection",
+      "type": "n8n-nodes-triton.triton",
+      "typeVersion": 1,
+      "position": [1200, 400],
+      "credentials": {
+        "tritonApi": {
+          "id": "2",
+          "name": "Triton Inference Server"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Analyze anomaly detection results\nconst deviceType = $input.item.json.deviceType;\nconst anomalyScores = $input.item.json.anomalyScores;\nconst originalData = $input.item.json.originalData;\nconst threshold = 0.75; // Configurable threshold for anomaly detection\n\n// Match scores to original data points\nconst analyzedData = [];\nif (Array.isArray(anomalyScores) && Array.isArray(originalData)) {\n  for (let i = 0; i < Math.min(anomalyScores.length, originalData.length); i++) {\n    const score = anomalyScores[i];\n    const data = originalData[i];\n    \n    analyzedData.push({\n      ...data,\n      anomaly_score: score,\n      is_anomaly: score > threshold\n    });\n  }\n}\n\n// Count anomalies\nconst anomalyCount = analyzedData.filter(d => d.is_anomaly).length;\nconst totalPoints = analyzedData.length;\nconst anomalyPercentage = totalPoints > 0 ? (anomalyCount / totalPoints) * 100 : 0;\n\n// Determine severity based on percentage of anomalies\nlet severity = 'normal';\nif (anomalyPercentage > 50) {\n  severity = 'critical';\n} else if (anomalyPercentage > 25) {\n  severity = 'warning';\n} else if (anomalyPercentage > 10) {\n  severity = 'attention';\n}\n\n// Device-specific analysis\nlet analysisDetails = {};\nswitch(deviceType.toLowerCase()) {\n  case 'temperature':\n    const avgTemp = analyzedData.reduce((sum, d) => sum + parseFloat(d.value), 0) / analyzedData.length;\n    const anomalyTemps = analyzedData.filter(d => d.is_anomaly).map(d => parseFloat(d.value));\n    const maxAnomalyTemp = anomalyTemps.length > 0 ? Math.max(...anomalyTemps) : null;\n    \n    analysisDetails = {\n      average_temperature: avgTemp,\n      max_anomaly_temperature: maxAnomalyTemp,\n      consistent_high_temp: anomalyTemps.length > 3\n    };\n    break;\n    \n  case 'humidity':\n    const avgHumidity = analyzedData.reduce((sum, d) => sum + parseFloat(d.value), 0) / analyzedData.length;\n    analysisDetails = {\n      average_humidity: avgHumidity\n    };\n    break;\n    \n  case 'power':\n    const totalPower = analyzedData.reduce((sum, d) => sum + parseFloat(d.value), 0);\n    const peakPower = Math.max(...analyzedData.map(d => parseFloat(d.value)));\n    analysisDetails = {\n      total_power_consumption: totalPower,\n      peak_power: peakPower\n    };\n    break;\n}\n\nreturn {\n  json: {\n    deviceType,\n    analyzedData,\n    anomalyCount,\n    totalPoints,\n    anomalyPercentage,\n    severity,\n    analysisDetails,\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "name": "Analyze Results",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1400, 400]
+    },
+    {
+      "parameters": {
+        "batchSize": 0,
+        "keepSource": true
+      },
+      "name": "Combine Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1600, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Consolidate all device analysis results\nconst items = $input.all;\nconst deviceResults = {};\nlet hasCriticalIssues = false;\nlet hasWarnings = false;\n\n// Collect all device results\nitems.forEach(item => {\n  const deviceType = item.json.deviceType;\n  deviceResults[deviceType] = item.json;\n  \n  if (item.json.severity === 'critical') {\n    hasCriticalIssues = true;\n  } else if (item.json.severity === 'warning') {\n    hasWarnings = true;\n  }\n});\n\n// Generate maintenance recommendations\nconst recommendations = [];\nconst notificationRequirements = [];\n\nObject.entries(deviceResults).forEach(([deviceType, result]) => {\n  if (result.anomalyCount > 0) {\n    switch(deviceType.toLowerCase()) {\n      case 'temperature':\n        if (result.severity === 'critical') {\n          recommendations.push({\n            device_type: deviceType,\n            recommendation: 'Immediate inspection required - Critical temperature anomalies detected',\n            priority: 'high',\n            action: 'inspect-cooling-system'\n          });\n          notificationRequirements.push('immediate');\n        } else if (result.severity === 'warning') {\n          recommendations.push({\n            device_type: deviceType,\n            recommendation: 'Schedule cooling system maintenance within 48 hours',\n            priority: 'medium',\n            action: 'schedule-maintenance'\n          });\n          notificationRequirements.push('daily');\n        }\n        break;\n        \n      case 'power':\n        if (result.severity === 'critical') {\n          recommendations.push({\n            device_type: deviceType,\n            recommendation: 'Power consumption anomalies detected - Check for electrical issues',\n            priority: 'high',\n            action: 'electrical-inspection'\n          });\n          notificationRequirements.push('immediate');\n        } else if (result.severity === 'warning') {\n          recommendations.push({\n            device_type: deviceType,\n            recommendation: 'Monitor power consumption - Potential efficiency issues',\n            priority: 'medium',\n            action: 'energy-audit'\n          });\n          notificationRequirements.push('weekly');\n        }\n        break;\n        \n      case 'humidity':\n        if (result.severity !== 'normal') {\n          recommendations.push({\n            device_type: deviceType,\n            recommendation: 'Check humidity control systems',\n            priority: result.severity === 'critical' ? 'high' : 'medium',\n            action: 'humidity-control-check'\n          });\n        }\n        break;\n        \n      case 'vibration':\n        if (result.severity === 'critical') {\n          recommendations.push({\n            device_type: deviceType,\n            recommendation: 'Critical vibration anomalies - Mechanical failure risk',\n            priority: 'high',\n            action: 'mechanical-inspection'\n          });\n          notificationRequirements.push('immediate');\n        } else if (result.severity !== 'normal') {\n          recommendations.push({\n            device_type: deviceType,\n            recommendation: 'Increased vibration detected - Schedule preventive maintenance',\n            priority: 'medium',\n            action: 'preventive-maintenance'\n          });\n        }\n        break;\n        \n      default:\n        if (result.severity !== 'normal') {\n          recommendations.push({\n            device_type: deviceType,\n            recommendation: `Anomalies detected in ${deviceType} - Inspection recommended`,\n            priority: result.severity === 'critical' ? 'high' : 'medium',\n            action: 'general-inspection'\n          });\n        }\n    }\n  }\n});\n\n// Determine notification level\nlet notificationLevel = 'none';\nif (notificationRequirements.includes('immediate')) {\n  notificationLevel = 'immediate';\n} else if (notificationRequirements.includes('daily')) {\n  notificationLevel = 'daily';\n} else if (notificationRequirements.includes('weekly')) {\n  notificationLevel = 'weekly';\n}\n\nreturn {\n  json: {\n    timestamp: new Date().toISOString(),\n    device_results: deviceResults,\n    has_critical_issues: hasCriticalIssues,\n    has_warnings: hasWarnings,\n    notification_level: notificationLevel,\n    recommendations: recommendations,\n    maintenance_required: recommendations.length > 0\n  }\n};"
+      },
+      "name": "Generate Recommendations",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1800, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.maintenance_required }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Maintenance Required?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2000, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://observability-stack.monitoring.svc.cluster.local:8086/api/v2/write?org=homelab&bucket=maintenance&precision=ns",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Token {{$env.INFLUXDB_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ \n// Format data for InfluxDB line protocol\nconst lines = [];\nconst ts = new Date($json.timestamp).getTime() * 1000000; // Convert to nanoseconds\n\n// Add a line for overall status\nlines.push(`maintenance_status,source=predictive critical=${$json.has_critical_issues ? 1 : 0},warnings=${$json.has_warnings ? 1 : 0},recommendation_count=${$json.recommendations.length} ${ts}`);\n\n// Add lines for each device type\nObject.entries($json.device_results).forEach(([deviceType, result]) => {\n  const tags = `source=predictive,device=${deviceType.replace(/\\s+/g, '_')}`;\n  lines.push(`device_status,${tags} anomaly_count=${result.anomalyCount},anomaly_percentage=${result.anomalyPercentage},severity=\"${result.severity}\" ${ts}`);\n});\n\nreturn lines.join('\\n');\n}}"
+            }
+          ]
+        }
+      },
+      "name": "Store in Observability Stack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2200, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://homeassistant.local:8123/api/events/predictive_maintenance_alert",
+        "allowUnauthorizedCerts": true,
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={{ { \n  \"has_critical_issues\": $json.has_critical_issues,\n  \"has_warnings\": $json.has_warnings,\n  \"notification_level\": $json.notification_level,\n  \"recommendations\": $json.recommendations,\n  \"devices_affected\": Object.keys($json.device_results),\n  \"timestamp\": $json.timestamp\n} }}"
+            }
+          ]
+        }
+      },
+      "name": "Trigger Home Assistant Event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2200, 500]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.notification_level }}",
+              "value2": "immediate",
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Is Immediate Notification?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2400, 400]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "home-assistant-notifications",
+        "routingKey": "maintenance.immediate",
+        "content": "={{ JSON.stringify({\n  \"title\": \"URGENT Maintenance Required\",\n  \"message\": `Critical issues detected: ${$json.recommendations.filter(r => r.priority === 'high').map(r => r.recommendation).join(', ')}`,\n  \"devices\": Object.keys($json.device_results),\n  \"timestamp\": $json.timestamp,\n  \"actions\": $json.recommendations.map(r => r.action)\n}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true,
+          "headers": {
+            "header": [
+              {
+                "name": "notification-type",
+                "value": "urgent"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Urgent Notification",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [2600, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "home-assistant-notifications",
+        "routingKey": "maintenance.standard",
+        "content": "={{ JSON.stringify({\n  \"title\": \"Maintenance Recommendation\",\n  \"message\": `Maintenance recommended: ${$json.recommendations.map(r => r.recommendation).join(', ')}`,\n  \"devices\": Object.keys($json.device_results),\n  \"timestamp\": $json.timestamp,\n  \"actions\": $json.recommendations.map(r => r.action)\n}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true,
+          "headers": {
+            "header": [
+              {
+                "name": "notification-type",
+                "value": "standard"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Standard Notification",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [2600, 500],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "RabbitMQ - Receive Sensor Data": {
+      "main": [
+        [
+          {
+            "node": "Process Sensor Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Sensor Data": {
+      "main": [
+        [
+          {
+            "node": "Is Error?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Error?": {
+      "true": [
+        [
+          {
+            "node": "Log Error to InfluxDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Preprocess for Anomaly Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Error to InfluxDB": {
+      "main": [
+        [
+          {
+            "node": "Send Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preprocess for Anomaly Detection": {
+      "main": [
+        [
+          {
+            "node": "Process Each Device Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Each Device Type": {
+      "main": [
+        [
+          {
+            "node": "Triton Anomaly Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triton Anomaly Detection": {
+      "main": [
+        [
+          {
+            "node": "Analyze Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Results": {
+      "main": [
+        [
+          {
+            "node": "Combine Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Results": {
+      "main": [
+        [
+          {
+            "node": "Generate Recommendations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Recommendations": {
+      "main": [
+        [
+          {
+            "node": "Maintenance Required?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Maintenance Required?": {
+      "true": [
+        [
+          {
+            "node": "Store in Observability Stack",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Trigger Home Assistant Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store in Observability Stack": {
+      "main": [
+        [
+          {
+            "node": "Is Immediate Notification?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Home Assistant Event": {
+      "main": [
+        [
+          {
+            "node": "Is Immediate Notification?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Immediate Notification?": {
+      "true": [
+        [
+          {
+            "node": "Send Urgent Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Send Standard Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler-workflow"
+  },
+  "staticData": {},
+  "tags": ["predictive maintenance", "anomaly detection", "iot", "home assistant"],
+  "pinData": {}
+}

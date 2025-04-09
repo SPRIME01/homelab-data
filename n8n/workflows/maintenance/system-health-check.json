@@ -1,0 +1,398 @@
+{
+  "name": "System Health Check",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Define system components to check\nconst systemComponents = [\n  {\n    name: 'homeassistant',\n    type: 'service',\n    healthEndpoint: 'http://homeassistant.local:8123/api/health',\n    authHeader: 'Bearer {{$env.HASS_TOKEN}}',\n    responseKey: 'status'\n  },\n  {\n    name: 'influxdb',\n    type: 'database',\n    healthEndpoint: 'http://influxdb.local:8086/health',\n    responseKey: 'status'\n  },\n  {\n    name: 'rabbitmq',\n    type: 'messagebroker',\n    healthEndpoint: 'http://rabbitmq.local:15672/api/healthchecks/node',\n    basicAuth: {\n      username: '{{$env.RABBITMQ_USER}}',\n      password: '{{$env.RABBITMQ_PASSWORD}}'\n    },\n    responseKey: 'status'\n  },\n  {\n    name: 'n8n',\n    type: 'automation',\n    healthEndpoint: 'http://n8n.local:5678/healthz',\n    responseKey: 'status'\n  },\n  {\n    name: 'triton',\n    type: 'inference',\n    healthEndpoint: 'http://triton.local:8000/v2/health/ready',\n    responseKey: null // No JSON response, just HTTP 200\n  },\n  {\n    name: 'traefik',\n    type: 'proxy',\n    healthEndpoint: 'http://traefik.local:8080/ping',\n    responseKey: null\n  }\n];\n\n// Define resource thresholds\nconst resourceThresholds = {\n  disk: {\n    warning: 85, // Percentage used\n    critical: 95\n  },\n  memory: {\n    warning: 80, // Percentage used\n    critical: 90\n  },\n  cpu: {\n    warning: 80, // Percentage used\n    critical: 95\n  },\n  load: {\n    warning: 1.5, // Load average per core\n    critical: 2.5\n  }\n};\n\n// Define disk paths to check\nconst diskPaths = [\n  { path: '/', name: 'system' },\n  { path: '/data', name: 'data' },\n  { path: '/backup', name: 'backup' }\n];\n\nreturn {\n  json: {\n    systemComponents,\n    resourceThresholds,\n    diskPaths,\n    timestamp: new Date().toISOString(),\n    checkId: `health-${Date.now()}`\n  }\n};"
+      },
+      "name": "Prepare Check Configuration",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "command": "=df -h {{ $json.diskPaths.map(p => p.path).join(' ') }} | awk 'NR>1 {print $1\",\"$5\",\"$6}'",
+        "executeDirectly": false
+      },
+      "name": "Check Disk Space",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 200]
+    },
+    {
+      "parameters": {
+        "command": "=free -m | awk 'NR==2{printf \"%.1f\", $3*100/$2 }'",
+        "executeDirectly": false
+      },
+      "name": "Check Memory Usage",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 360]
+    },
+    {
+      "parameters": {
+        "command": "=top -bn1 | grep \"Cpu(s)\" | awk '{print $2 + $4}'",
+        "executeDirectly": false
+      },
+      "name": "Check CPU Usage",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 520]
+    },
+    {
+      "parameters": {
+        "command": "cat /proc/loadavg | awk '{print $1 \" \" $2 \" \" $3}'",
+        "executeDirectly": false
+      },
+      "name": "Check System Load",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 680]
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "options": {},
+        "items": "={{ $json.systemComponents }}"
+      },
+      "name": "Process Each Component",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [800, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.healthEndpoint }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $json.authHeader }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          },
+          "redirect": {
+            "followRedirects": true,
+            "maxRedirects": 5
+          },
+          "timeout": 5000
+        }
+      },
+      "name": "Check Service Health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1000, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process health check result\nconst component = $input.item.json;\nconst response = $node[\"Check Service Health\"].json;\nconst statusCode = $node[\"Check Service Health\"].statusCode || 500;\nconst isHttpSuccess = statusCode >= 200 && statusCode < 300;\n\n// Check if the service is responding properly\nlet status = 'failed';\nlet statusMessage = 'Health check failed';\n\nif (isHttpSuccess) {\n  if (component.responseKey === null) {\n    // If no responseKey is specified, just check for HTTP 200\n    status = 'healthy';\n    statusMessage = 'Service is responding';\n  } else if (response && response[component.responseKey]) {\n    // Check the specific response key\n    const responseStatus = response[component.responseKey];\n    if (responseStatus === 'ok' || responseStatus === 'pass' || responseStatus === 'UP' || responseStatus === 'healthy') {\n      status = 'healthy';\n      statusMessage = 'Service reported healthy status';\n    } else {\n      status = 'degraded';\n      statusMessage = `Service reported issue: ${responseStatus}`;\n    }\n  } else {\n    status = 'unknown';\n    statusMessage = 'Service response format unexpected';\n  }\n} else {\n  status = 'failed';\n  statusMessage = `HTTP status: ${statusCode}`;\n}\n\nreturn {\n  json: {\n    ...component,\n    status,\n    statusMessage,\n    responseCode: statusCode,\n    responseTime: $node[\"Check Service Health\"].runTimeSeconds * 1000, // Convert to ms\n    checkedAt: new Date().toISOString()\n  }\n};"
+      },
+      "name": "Process Health Result",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 0,
+        "keepSource": true
+      },
+      "name": "Combine Health Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1400, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process resource check results\nconst diskOutput = $node[\"Check Disk Space\"].json.stdout;\nconst memoryOutput = $node[\"Check Memory Usage\"].json.stdout;\nconst cpuOutput = $node[\"Check CPU Usage\"].json.stdout;\nconst loadOutput = $node[\"Check System Load\"].json.stdout;\nconst thresholds = $json.resourceThresholds;\nconst diskPaths = $json.diskPaths;\n\n// Parse disk information\nconst diskLines = diskOutput.trim().split('\\n');\nconst diskUsage = [];\n\ndiskLines.forEach(line => {\n  const [device, usagePercent, mountPoint] = line.split(',');\n  \n  // Find matching path from configuration\n  const diskConfig = diskPaths.find(d => mountPoint === d.path);\n  const diskName = diskConfig ? diskConfig.name : mountPoint;\n  \n  // Extract percentage\n  const usageValue = parseInt(usagePercent.replace('%', ''));\n  \n  // Determine status\n  let status = 'healthy';\n  if (usageValue >= thresholds.disk.critical) {\n    status = 'critical';\n  } else if (usageValue >= thresholds.disk.warning) {\n    status = 'warning';\n  }\n  \n  diskUsage.push({\n    device,\n    mountPoint,\n    name: diskName,\n    usagePercent: usageValue,\n    status\n  });\n});\n\n// Parse memory usage\nconst memoryUsage = parseFloat(memoryOutput);\nlet memoryStatus = 'healthy';\nif (memoryUsage >= thresholds.memory.critical) {\n  memoryStatus = 'critical';\n} else if (memoryUsage >= thresholds.memory.warning) {\n  memoryStatus = 'warning';\n}\n\n// Parse CPU usage\nconst cpuUsage = parseFloat(cpuOutput);\nlet cpuStatus = 'healthy';\nif (cpuUsage >= thresholds.cpu.critical) {\n  cpuStatus = 'critical';\n} else if (cpuUsage >= thresholds.cpu.warning) {\n  cpuStatus = 'warning';\n}\n\n// Parse system load\nconst [load1, load5, load15] = loadOutput.trim().split(' ').map(parseFloat);\n\n// Get number of CPU cores to contextualize load\nlet cpuCores = 1; // Default\ntry {\n  cpuCores = require('os').cpus().length;\n} catch (e) {\n  // Fallback if os module is not available\n  cpuCores = 4; // Assume 4 cores\n}\n\nconst normalizedLoad = load1 / cpuCores;\nlet loadStatus = 'healthy';\nif (normalizedLoad >= thresholds.load.critical) {\n  loadStatus = 'critical';\n} else if (normalizedLoad >= thresholds.load.warning) {\n  loadStatus = 'warning';\n}\n\nconst resourceStatus = {\n  disk: diskUsage,\n  memory: {\n    usagePercent: memoryUsage,\n    status: memoryStatus\n  },\n  cpu: {\n    usagePercent: cpuUsage,\n    status: cpuStatus\n  },\n  load: {\n    load1,\n    load5,\n    load15,\n    normalizedLoad,\n    cpuCores,\n    status: loadStatus\n  }\n};\n\n// Determine overall system status\nlet systemStatus = 'healthy';\nif (\n  diskUsage.some(d => d.status === 'critical') ||\n  memoryStatus === 'critical' ||\n  cpuStatus === 'critical' ||\n  loadStatus === 'critical'\n) {\n  systemStatus = 'critical';\n} else if (\n  diskUsage.some(d => d.status === 'warning') ||\n  memoryStatus === 'warning' ||\n  cpuStatus === 'warning' ||\n  loadStatus === 'warning'\n) {\n  systemStatus = 'warning';\n}\n\n// Get service health status\nconst serviceComponents = $json.systemComponents.map(component => {\n  const result = $json.serviceResults?.find(r => r.name === component.name);\n  return result || {\n    ...component,\n    status: 'unknown',\n    statusMessage: 'Check not performed',\n    checkedAt: new Date().toISOString()\n  };\n});\n\nconst servicesStatus = {\n  healthy: serviceComponents.filter(s => s.status === 'healthy').length,\n  degraded: serviceComponents.filter(s => s.status === 'degraded').length,\n  failed: serviceComponents.filter(s => s.status === 'failed').length,\n  unknown: serviceComponents.filter(s => s.status === 'unknown').length,\n  total: serviceComponents.length\n};\n\n// Determine if any service requires immediate attention\nconst needsAttention = serviceComponents.some(s => s.status === 'failed');\n\nreturn {\n  json: {\n    checkId: $json.checkId,\n    timestamp: new Date().toISOString(),\n    systemStatus,\n    needsAttention,\n    resources: resourceStatus,\n    services: {\n      components: serviceComponents,\n      summary: servicesStatus\n    }\n  }\n};"
+      },
+      "name": "Analyze Health Results",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1600, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://observability-stack.monitoring.svc.cluster.local:8086/api/v2/write?org=homelab&bucket=monitoring&precision=ns",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Token {{ $env.INFLUXDB_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ \n// Format data for InfluxDB line protocol\nconst data = $json;\nconst lines = [];\nconst timestamp = Date.now() * 1000000; // Convert to nanoseconds\n\n// System resources\n// CPU\nlines.push(`system_cpu,host=homelab usage=${data.resources.cpu.usagePercent} ${timestamp}`);\n\n// Memory\nlines.push(`system_memory,host=homelab usage=${data.resources.memory.usagePercent} ${timestamp}`);\n\n// Load\nlines.push(`system_load,host=homelab load1=${data.resources.load.load1},load5=${data.resources.load.load5},load15=${data.resources.load.load15} ${timestamp}`);\n\n// Disk\ndata.resources.disk.forEach(disk => {\n  lines.push(`system_disk,host=homelab,mount=${disk.mountPoint},device=${disk.device} usage=${disk.usagePercent} ${timestamp}`);\n});\n\n// Services health\ndata.services.components.forEach(service => {\n  // Convert status to numeric value\n  let statusValue = 0; // failed\n  if (service.status === 'healthy') statusValue = 2;\n  else if (service.status === 'degraded') statusValue = 1;\n  else if (service.status === 'unknown') statusValue = -1;\n  \n  lines.push(`service_health,host=homelab,service=${service.name},type=${service.type} status=${statusValue},response_time=${service.responseTime || 0} ${timestamp}`);\n});\n\n// System overall status\nlet systemStatusValue = 0; // critical\nif (data.systemStatus === 'healthy') systemStatusValue = 2;\nelse if (data.systemStatus === 'warning') systemStatusValue = 1;\n\nlines.push(`system_status,host=homelab status=${systemStatusValue},services_healthy=${data.services.summary.healthy},services_failed=${data.services.summary.failed} ${timestamp}`);\n\nreturn lines.join('\\n');\n}}"
+            }
+          ]
+        }
+      },
+      "name": "Log to InfluxDB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1800, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.needsAttention }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Needs Attention?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "homelab-notifications",
+        "routingKey": "system.health",
+        "content": "={{ JSON.stringify({\n  \"title\": `System Health Alert: ${$json.systemStatus.toUpperCase()}`,\n  \"message\": `System health check detected issues: ${$json.services.components.filter(s => s.status === 'failed').map(s => s.name).join(', ')}`,\n  \"severity\": $json.systemStatus === 'critical' ? \"critical\" : \"warning\",\n  \"component\": \"system-monitor\",\n  \"details\": {\n    \"timestamp\": $json.timestamp,\n    \"failedServices\": $json.services.components.filter(s => s.status === 'failed').map(s => ({ name: s.name, message: s.statusMessage })),\n    \"resourceIssues\": [\n      ...($json.resources.cpu.status !== 'healthy' ? [`CPU usage: ${$json.resources.cpu.usagePercent}%`] : []),\n      ...($json.resources.memory.status !== 'healthy' ? [`Memory usage: ${$json.resources.memory.usagePercent}%`] : []),\n      ...($json.resources.load.status !== 'healthy' ? [`System load: ${$json.resources.load.load1} (${$json.resources.load.normalizedLoad} per core)`] : []),\n      ...$json.resources.disk.filter(d => d.status !== 'healthy').map(d => `Disk ${d.name}: ${d.usagePercent}% full`)\n    ]\n  },\n  \"actions\": [\n    { \"name\": \"View Dashboard\", \"url\": \"/admin/system\" }\n  ]\n}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true
+        }
+      },
+      "name": "Send Alert Notification",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [2200, 200],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/states/sensor.system_health_status",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{ $env.HASS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"state\": \"{{ $json.systemStatus }}\",\n  \"attributes\": {\n    \"friendly_name\": \"System Health\",\n    \"icon\": \"{{ $json.systemStatus === 'healthy' ? 'mdi:check-circle' : ($json.systemStatus === 'warning' ? 'mdi:alert' : 'mdi:alert-circle') }}\",\n    \"cpu_usage\": {{ $json.resources.cpu.usagePercent }},\n    \"memory_usage\": {{ $json.resources.memory.usagePercent }},\n    \"load\": {{ $json.resources.load.load1 }},\n    \"services_healthy\": {{ $json.services.summary.healthy }},\n    \"services_degraded\": {{ $json.services.summary.degraded }},\n    \"services_failed\": {{ $json.services.summary.failed }},\n    \"last_check\": \"{{ $json.timestamp }}\"\n  }\n}"
+            }
+          ]
+        }
+      },
+      "name": "Update Home Assistant Entity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2200, 400]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare Check Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Check Configuration": {
+      "main": [
+        [
+          {
+            "node": "Check Disk Space",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Memory Usage",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check CPU Usage",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check System Load",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Process Each Component",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Each Component": {
+      "main": [
+        [
+          {
+            "node": "Check Service Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Service Health": {
+      "main": [
+        [
+          {
+            "node": "Process Health Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Health Result": {
+      "main": [
+        [
+          {
+            "node": "Combine Health Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Health Results": {
+      "main": [
+        [
+          {
+            "node": "Analyze Health Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Health Results": {
+      "main": [
+        [
+          {
+            "node": "Log to InfluxDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to InfluxDB": {
+      "main": [
+        [
+          {
+            "node": "Needs Attention?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Attention?": {
+      "true": [
+        [
+          {
+            "node": "Send Alert Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Update Home Assistant Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Alert Notification": {
+      "main": [
+        [
+          {
+            "node": "Update Home Assistant Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": {},
+  "tags": ["maintenance", "monitoring", "health-check"],
+  "pinData": {}
+}

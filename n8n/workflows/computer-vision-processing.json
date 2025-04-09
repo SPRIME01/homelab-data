@@ -1,0 +1,515 @@
+{
+  "name": "Computer Vision Processing",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "consume",
+        "queue": "home-assistant-camera-images",
+        "consumeOptions": {
+          "noAck": false,
+          "maxMessages": 1,
+          "headerFiltering": true,
+          "headerFilters": {
+            "filter": [
+              {
+                "name": "message-type",
+                "value": "camera-image",
+                "matchType": "equals"
+              }
+            ]
+          }
+        }
+      },
+      "name": "RabbitMQ - Receive Images",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract image data and metadata from the message\nconst data = $input.item.json.messages[0];\nlet content, deviceInfo, imageFormat, timestamp, messageId, configId;\n\ntry {\n  // Parse the message content\n  content = typeof data.content === 'string' ? JSON.parse(data.content) : data.content;\n  \n  // Extract metadata\n  deviceInfo = content.device || {};\n  imageFormat = content.format || 'jpeg';\n  timestamp = content.timestamp || new Date().toISOString();\n  messageId = data.properties?.messageId || `msg-${Date.now()}`;\n  configId = content.config_id || 'default';\n  \n  // Extract the base64 image data\n  const imageData = content.image_data;\n  if (!imageData) {\n    throw new Error('No image data found in message');\n  }\n  \n  // Get detection configuration\n  const configs = {\n    'default': {\n      modelName: 'yolov5',\n      threshold: 0.5,\n      regionOfInterest: null,\n      targetClasses: ['person', 'car', 'truck', 'dog', 'cat']\n    },\n    'front-door': {\n      modelName: 'yolov5',\n      threshold: 0.45,\n      regionOfInterest: {x: 100, y: 150, width: 400, height: 300},\n      targetClasses: ['person']\n    },\n    'driveway': {\n      modelName: 'yolov5',\n      threshold: 0.4,\n      regionOfInterest: null,\n      targetClasses: ['car', 'truck', 'motorcycle', 'bicycle', 'person']\n    },\n    'backyard': {\n      modelName: 'efficientdet',\n      threshold: 0.6,\n      regionOfInterest: null,\n      targetClasses: ['person', 'dog', 'cat']\n    }\n  };\n  \n  // Get the appropriate config or use default\n  const detectionConfig = configs[configId] || configs.default;\n  \n  return {\n    json: {\n      imageData,\n      imageFormat,\n      deviceInfo,\n      timestamp,\n      messageId,\n      configId,\n      modelName: detectionConfig.modelName,\n      threshold: detectionConfig.threshold,\n      regionOfInterest: detectionConfig.regionOfInterest,\n      targetClasses: detectionConfig.targetClasses\n    }\n  };\n} catch (error) {\n  console.log('Error processing image data:', error);\n  return {\n    json: {\n      error: 'Failed to process image data',\n      errorDetail: error.message,\n      rawData: data\n    }\n  };\n}"
+      },
+      "name": "Extract Image Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.error }}",
+              "operation": "exists"
+            }
+          ]
+        }
+      },
+      "name": "Is Error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "home-assistant-responses",
+        "routingKey": "vision.error",
+        "content": "={{ JSON.stringify({message_id: $json.messageId || 'unknown', error: $json.error, error_detail: $json.errorDetail, timestamp: new Date().toISOString()}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true,
+          "headers": {
+            "header": [
+              {
+                "name": "response-type",
+                "value": "error"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Error Response",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [800, 200],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare image data for inference\nconst imageData = $input.item.json.imageData;\nconst modelName = $input.item.json.modelName;\nconst regionOfInterest = $input.item.json.regionOfInterest;\n\n// Process region of interest if needed\nlet processedImageData = imageData;\nlet roiMetadata = null;\n\nif (regionOfInterest) {\n  // In a real implementation, this would crop the image to the ROI\n  // For this example, we're just passing the ROI metadata\n  roiMetadata = regionOfInterest;\n}\n\n// Select the appropriate model parameters based on the model name\nlet inputName, outputName, preprocessingParams;\n\nswitch(modelName) {\n  case 'yolov5':\n    inputName = 'images';\n    outputName = 'output';\n    preprocessingParams = { size: 640 };\n    break;\n  case 'efficientdet':\n    inputName = 'input';\n    outputName = 'detections';\n    preprocessingParams = { size: 512 };\n    break;\n  default:\n    inputName = 'images';\n    outputName = 'output';\n    preprocessingParams = { size: 640 };\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    processedImageData,\n    roiMetadata,\n    inputName,\n    outputName,\n    preprocessingParams\n  }\n};"
+      },
+      "name": "Prepare Image for Inference",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [800, 400]
+    },
+    {
+      "parameters": {
+        "model": "={{ $json.modelName }}",
+        "inputDataField": "processedImageData",
+        "inputName": "={{ $json.inputName }}",
+        "outputName": "={{ $json.outputName }}",
+        "inputDataType": "FP32",
+        "options": {
+          "timeout": 30000,
+          "resultFieldName": "detectionResults"
+        }
+      },
+      "name": "Triton Object Detection",
+      "type": "n8n-nodes-triton.triton",
+      "typeVersion": 1,
+      "position": [1000, 400],
+      "credentials": {
+        "tritonApi": {
+          "id": "2",
+          "name": "Triton Inference Server"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process detection results and filter based on configuration\nconst detectionResults = $input.item.json.detectionResults;\nconst threshold = $input.item.json.threshold;\nconst targetClasses = $input.item.json.targetClasses;\nconst deviceInfo = $input.item.json.deviceInfo;\nconst timestamp = $input.item.json.timestamp;\nconst messageId = $input.item.json.messageId;\nconst configId = $input.item.json.configId;\n\n// Parse the raw detection results based on model format\nlet parsedDetections = [];\n\nif ($input.item.json.modelName === 'yolov5') {\n  // YOLOv5 results parsing\n  const boxes = detectionResults.boxes || [];\n  parsedDetections = boxes.map(box => ({\n    class: box.class_name,\n    confidence: box.confidence,\n    bbox: {\n      x1: box.x1,\n      y1: box.y1,\n      x2: box.x2,\n      y2: box.y2\n    }\n  }));\n} else if ($input.item.json.modelName === 'efficientdet') {\n  // EfficientDet results parsing\n  const detections = detectionResults.detections || [];\n  parsedDetections = detections.map(det => ({\n    class: det.label,\n    confidence: det.score,\n    bbox: {\n      x1: det.box[0],\n      y1: det.box[1],\n      x2: det.box[2],\n      y2: det.box[3]\n    }\n  }));\n}\n\n// Filter detections based on confidence threshold and target classes\nconst filteredDetections = parsedDetections.filter(det => \n  det.confidence >= threshold && targetClasses.includes(det.class)\n);\n\n// Count objects by class\nconst objectCounts = {};\nfilteredDetections.forEach(det => {\n  objectCounts[det.class] = (objectCounts[det.class] || 0) + 1;\n});\n\n// Determine if this is an alert situation\nlet isAlert = false;\nlet alertReason = '';\n\n// Define alert conditions based on config\nif (configId === 'front-door' && objectCounts.person > 0) {\n  isAlert = true;\n  alertReason = 'Person detected at front door';\n} else if (configId === 'driveway' && (objectCounts.car > 0 || objectCounts.truck > 0)) {\n  isAlert = true;\n  alertReason = 'Vehicle detected in driveway';\n} else if (configId === 'backyard' && objectCounts.person > 0) {\n  isAlert = true;\n  alertReason = 'Person detected in backyard';\n}\n\nreturn {\n  json: {\n    deviceInfo,\n    timestamp,\n    messageId,\n    configId,\n    filteredDetections,\n    objectCounts,\n    detectionCount: filteredDetections.length,\n    isAlert,\n    alertReason,\n    modelName: $input.item.json.modelName\n  }\n};"
+      },
+      "name": "Process Detection Results",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1200, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.detectionCount }}",
+              "value2": 0,
+              "operation": "notEqual"
+            }
+          ]
+        }
+      },
+      "name": "Objects Detected?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1400, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.isAlert }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Is Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1600, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://homeassistant.local:8123/api/events/computer_vision_alert",
+        "allowUnauthorizedCerts": true,
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={{ { \n  \"camera_id\": $json.deviceInfo.entity_id,\n  \"alert_reason\": $json.alertReason,\n  \"object_counts\": $json.objectCounts,\n  \"config_id\": $json.configId,\n  \"detection_count\": $json.detectionCount,\n  \"timestamp\": $json.timestamp\n} }}"
+            }
+          ]
+        }
+      },
+      "name": "Trigger Home Assistant Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1800, 200]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "home-assistant-responses",
+        "routingKey": "vision.detection",
+        "content": "={{ JSON.stringify({\n  message_id: $json.messageId,\n  camera_id: $json.deviceInfo.entity_id,\n  detections: $json.filteredDetections,\n  object_counts: $json.objectCounts,\n  detection_count: $json.detectionCount,\n  config_id: $json.configId,\n  is_alert: $json.isAlert,\n  alert_reason: $json.alertReason,\n  timestamp: $json.timestamp\n}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true,
+          "headers": {
+            "header": [
+              {
+                "name": "detection-type",
+                "value": "={{ $json.isAlert ? 'alert' : 'standard' }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Detection Results",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [1800, 400],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://influxdb.local:8086/api/v2/write",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "queryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "org",
+              "value": "homelab"
+            },
+            {
+              "name": "bucket",
+              "value": "computer_vision"
+            },
+            {
+              "name": "precision",
+              "value": "ns"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ \n// Format data in Line Protocol for InfluxDB\nconst entries = [];\nconst ts = new Date($json.timestamp).getTime() * 1000000; // Convert to nanoseconds\nconst camera = $json.deviceInfo.entity_id.replace(/\\./g, '_');\n\n// Add detection count\nentries.push(`computer_vision,camera=${camera},config=${$json.configId} detection_count=${$json.detectionCount} ${ts}`);\n\n// Add object counts\nObject.entries($json.objectCounts).forEach(([className, count]) => {\n  entries.push(`computer_vision,camera=${camera},config=${$json.configId},class=${className} count=${count} ${ts}`);\n});\n\n// Add alert status\nentries.push(`computer_vision,camera=${camera},config=${$json.configId} is_alert=${$json.isAlert ? 1 : 0} ${ts}`);\n\nreturn entries.join('\\n');\n}}"
+            }
+          ]
+        }
+      },
+      "name": "Store Results in InfluxDB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2000, 400],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "3",
+          "name": "InfluxDB Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "home-assistant-responses",
+        "routingKey": "vision.no_detection",
+        "content": "={{ JSON.stringify({\n  message_id: $json.messageId,\n  camera_id: $json.deviceInfo.entity_id,\n  config_id: $json.configId,\n  timestamp: $json.timestamp,\n  note: 'No objects of interest detected'\n}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true
+        }
+      },
+      "name": "Report No Detection",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [1600, 600],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://influxdb.local:8086/api/v2/write",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "queryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "org",
+              "value": "homelab"
+            },
+            {
+              "name": "bucket",
+              "value": "computer_vision"
+            },
+            {
+              "name": "precision",
+              "value": "ns"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ \n// Format data for no detection in Line Protocol\nconst ts = new Date($json.timestamp).getTime() * 1000000; // Convert to nanoseconds\nconst camera = $json.deviceInfo.entity_id.replace(/\\./g, '_');\n\nreturn `computer_vision,camera=${camera},config=${$json.configId} detection_count=0 ${ts}`;\n}}"
+            }
+          ]
+        }
+      },
+      "name": "Log No Detection",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1800, 600],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "3",
+          "name": "InfluxDB Token"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "RabbitMQ - Receive Images": {
+      "main": [
+        [
+          {
+            "node": "Extract Image Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Image Data": {
+      "main": [
+        [
+          {
+            "node": "Is Error?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Error?": {
+      "true": [
+        [
+          {
+            "node": "Send Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Prepare Image for Inference",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Image for Inference": {
+      "main": [
+        [
+          {
+            "node": "Triton Object Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triton Object Detection": {
+      "main": [
+        [
+          {
+            "node": "Process Detection Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Detection Results": {
+      "main": [
+        [
+          {
+            "node": "Objects Detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Objects Detected?": {
+      "true": [
+        [
+          {
+            "node": "Is Alert?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Report No Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Alert?": {
+      "true": [
+        [
+          {
+            "node": "Trigger Home Assistant Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "false": [
+        [
+          {
+            "node": "Send Detection Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Home Assistant Alert": {
+      "main": [
+        [
+          {
+            "node": "Send Detection Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Detection Results": {
+      "main": [
+        [
+          {
+            "node": "Store Results in InfluxDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report No Detection": {
+      "main": [
+        [
+          {
+            "node": "Log No Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": {},
+  "tags": ["computer vision", "object detection", "home assistant", "camera"],
+  "pinData": {}
+}

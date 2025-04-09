@@ -1,0 +1,272 @@
+{
+  "name": "Data Aggregation",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "consume",
+        "queue": "data-processing-aggregate",
+        "options": {
+          "contentType": "application/json"
+        }
+      },
+      "name": "RabbitMQ Input",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract message properties\nconst message = $input.item.json.messages[0];\nconst content = typeof message.content === 'string' ? JSON.parse(message.content) : message.content;\n\n// Extract aggregation parameters\nconst data = content.data || {};\nconst aggregationType = content.aggregationType || 'append';\nconst groupBy = content.groupBy || null;\nconst timeWindow = content.timeWindow || { minutes: 5 };\nconst aggregationKey = content.aggregationKey || 'default';\nconst maximumItems = content.maximumItems || 1000;\n\nreturn {\n  json: {\n    data,\n    aggregationType,\n    groupBy,\n    timeWindow,\n    aggregationKey,\n    maximumItems,\n    timestamp: new Date().toISOString(),\n    messageId: message.properties?.messageId || `msg-${Date.now()}`\n  }\n};"
+      },
+      "name": "Extract Message Properties",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "mode": "chooseBranch",
+        "output": "={{ $json.aggregationType }}"
+      },
+      "name": "Determine Aggregation Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Append data to existing collection\nconst data = $input.item.json.data;\nconst aggregationKey = $input.item.json.aggregationKey;\nconst timeWindow = $input.item.json.timeWindow;\nconst groupBy = $input.item.json.groupBy;\nconst maximumItems = $input.item.json.maximumItems;\n\n// Get or initialize static data for this aggregation key\nlet staticData = $getWorkflowStaticData(\"global\");\nif (!staticData[aggregationKey]) {\n  staticData[aggregationKey] = {\n    items: [],\n    lastUpdated: new Date().toISOString(),\n    groups: {}\n  };\n}\n\n// Function to check if an item is within the time window\nfunction isWithinTimeWindow(timestamp, timeWindow) {\n  const itemDate = new Date(timestamp);\n  const now = new Date();\n  \n  // Calculate time window in milliseconds\n  let timeoutMs = 0;\n  if (timeWindow.seconds) timeoutMs += timeWindow.seconds * 1000;\n  if (timeWindow.minutes) timeoutMs += timeWindow.minutes * 60 * 1000;\n  if (timeWindow.hours) timeoutMs += timeWindow.hours * 60 * 60 * 1000;\n  if (timeWindow.days) timeoutMs += timeWindow.days * 24 * 60 * 60 * 1000;\n  \n  return (now.getTime() - itemDate.getTime()) <= timeoutMs;\n}\n\n// Trim old data outside the time window\nstaticData[aggregationKey].items = staticData[aggregationKey].items.filter(item => \n  isWithinTimeWindow(item.timestamp, timeWindow)\n);\n\n// Add new data\nconst newItem = {\n  ...data,\n  timestamp: new Date().toISOString()\n};\nstaticData[aggregationKey].items.push(newItem);\n\n// Trim to maximum items if needed\nif (staticData[aggregationKey].items.length > maximumItems) {\n  staticData[aggregationKey].items = staticData[aggregationKey].items.slice(-maximumItems);\n}\n\n// Update last updated timestamp\nstaticData[aggregationKey].lastUpdated = new Date().toISOString();\n\n// Group data if needed\nif (groupBy) {\n  staticData[aggregationKey].groups = {};\n  \n  // Function to get nested property value\n  function getPropertyValue(obj, path) {\n    return path.split('.').reduce((o, i) => o ? o[i] : undefined, obj);\n  }\n  \n  // Group items by the specified field\n  staticData[aggregationKey].items.forEach(item => {\n    const groupValue = getPropertyValue(item, groupBy);\n    if (groupValue !== undefined) {\n      if (!staticData[aggregationKey].groups[groupValue]) {\n        staticData[aggregationKey].groups[groupValue] = [];\n      }\n      staticData[aggregationKey].groups[groupValue].push(item);\n    }\n  });\n}\n\n// Return the current aggregated state\nreturn {\n  json: {\n    ...$input.item.json,\n    aggregatedData: {\n      items: staticData[aggregationKey].items,\n      count: staticData[aggregationKey].items.length,\n      lastUpdated: staticData[aggregationKey].lastUpdated,\n      groups: staticData[aggregationKey].groups,\n      timeWindow\n    }\n  }\n};"
+      },
+      "name": "Append Aggregation",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [780, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Calculate summary statistics for numerical fields\nconst data = $input.item.json.data;\nconst aggregationKey = $input.item.json.aggregationKey;\nconst timeWindow = $input.item.json.timeWindow;\nconst groupBy = $input.item.json.groupBy;\nconst maximumItems = $input.item.json.maximumItems;\n\n// Get or initialize static data for this aggregation key\nlet staticData = $getWorkflowStaticData(\"global\");\nif (!staticData[aggregationKey]) {\n  staticData[aggregationKey] = {\n    items: [],\n    stats: {},\n    lastUpdated: new Date().toISOString(),\n    groups: {}\n  };\n}\n\n// Function to check if an item is within the time window\nfunction isWithinTimeWindow(timestamp, timeWindow) {\n  const itemDate = new Date(timestamp);\n  const now = new Date();\n  \n  // Calculate time window in milliseconds\n  let timeoutMs = 0;\n  if (timeWindow.seconds) timeoutMs += timeWindow.seconds * 1000;\n  if (timeWindow.minutes) timeoutMs += timeWindow.minutes * 60 * 1000;\n  if (timeWindow.hours) timeoutMs += timeWindow.hours * 60 * 60 * 1000;\n  if (timeWindow.days) timeoutMs += timeWindow.days * 24 * 60 * 60 * 1000;\n  \n  return (now.getTime() - itemDate.getTime()) <= timeoutMs;\n}\n\n// Trim old data outside the time window\nstaticData[aggregationKey].items = staticData[aggregationKey].items.filter(item => \n  isWithinTimeWindow(item.timestamp, timeWindow)\n);\n\n// Add new data\nconst newItem = {\n  ...data,\n  timestamp: new Date().toISOString()\n};\nstaticData[aggregationKey].items.push(newItem);\n\n// Trim to maximum items if needed\nif (staticData[aggregationKey].items.length > maximumItems) {\n  staticData[aggregationKey].items = staticData[aggregationKey].items.slice(-maximumItems);\n}\n\n// Calculate statistics for all numeric fields\nconst stats = {};\nconst numericData = {};\n\n// Find all numeric fields in the data\nfunction identifyNumericFields(items) {\n  const numericFields = new Set();\n  \n  items.forEach(item => {\n    Object.entries(item).forEach(([key, value]) => {\n      if (typeof value === 'number') {\n        numericFields.add(key);\n      }\n    });\n  });\n  \n  return Array.from(numericFields);\n}\n\nconst numericFields = identifyNumericFields(staticData[aggregationKey].items);\n\n// Initialize arrays for each numeric field\nnumericFields.forEach(field => {\n  numericData[field] = [];\n});\n\n// Collect values for each numeric field\nstaticData[aggregationKey].items.forEach(item => {\n  numericFields.forEach(field => {\n    if (typeof item[field] === 'number') {\n      numericData[field].push(item[field]);\n    }\n  });\n});\n\n// Calculate statistics for each field\nnumericFields.forEach(field => {\n  const values = numericData[field];\n  \n  // Skip if no values\n  if (values.length === 0) {\n    stats[field] = null;\n    return;\n  }\n  \n  // Sort values for percentile calculations\n  const sortedValues = [...values].sort((a, b) => a - b);\n  \n  // Calculate basic statistics\n  const sum = values.reduce((a, b) => a + b, 0);\n  const mean = sum / values.length;\n  const min = Math.min(...values);\n  const max = Math.max(...values);\n  \n  // Calculate median (50th percentile)\n  const midIndex = Math.floor(sortedValues.length / 2);\n  const median = sortedValues.length % 2 === 0\n    ? (sortedValues[midIndex - 1] + sortedValues[midIndex]) / 2\n    : sortedValues[midIndex];\n  \n  // Calculate variance and standard deviation\n  const variance = values.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / values.length;\n  const stdDev = Math.sqrt(variance);\n  \n  // Calculate percentiles\n  function percentile(values, p) {\n    const index = Math.floor(values.length * (p / 100));\n    return values[index];\n  }\n  \n  stats[field] = {\n    mean,\n    median,\n    min,\n    max,\n    sum,\n    count: values.length,\n    variance,\n    stdDev,\n    p95: percentile(sortedValues, 95),\n    p99: percentile(sortedValues, 99),\n  };\n});\n\n// Store the statistics\nstaticData[aggregationKey].stats = stats;\nstaticData[aggregationKey].lastUpdated = new Date().toISOString();\n\n// Group data if needed\nif (groupBy) {\n  staticData[aggregationKey].groups = {};\n  \n  // Function to get nested property value\n  function getPropertyValue(obj, path) {\n    return path.split('.').reduce((o, i) => o ? o[i] : undefined, obj);\n  }\n  \n  // Group items and calculate per-group statistics\n  const groupStats = {};\n  \n  staticData[aggregationKey].items.forEach(item => {\n    const groupValue = getPropertyValue(item, groupBy);\n    if (groupValue !== undefined) {\n      if (!staticData[aggregationKey].groups[groupValue]) {\n        staticData[aggregationKey].groups[groupValue] = [];\n        groupStats[groupValue] = {};\n        \n        // Initialize per-group numeric data arrays\n        numericFields.forEach(field => {\n          groupStats[groupValue][field] = [];\n        });\n      }\n      \n      staticData[aggregationKey].groups[groupValue].push(item);\n      \n      // Collect per-group numeric values\n      numericFields.forEach(field => {\n        if (typeof item[field] === 'number') {\n          groupStats[groupValue][field].push(item[field]);\n        }\n      });\n    }\n  });\n  \n  // Calculate statistics for each group\n  const groupedStats = {};\n  \n  Object.entries(groupStats).forEach(([groupValue, fieldArrays]) => {\n    groupedStats[groupValue] = {};\n    \n    numericFields.forEach(field => {\n      const values = fieldArrays[field];\n      \n      if (values.length === 0) {\n        groupedStats[groupValue][field] = null;\n        return;\n      }\n      \n      const sortedValues = [...values].sort((a, b) => a - b);\n      const sum = values.reduce((a, b) => a + b, 0);\n      const mean = sum / values.length;\n      const min = Math.min(...values);\n      const max = Math.max(...values);\n      \n      // Calculate median (50th percentile)\n      const midIndex = Math.floor(sortedValues.length / 2);\n      const median = sortedValues.length % 2 === 0\n        ? (sortedValues[midIndex - 1] + sortedValues[midIndex]) / 2\n        : sortedValues[midIndex];\n      \n      // Calculate variance and standard deviation\n      const variance = values.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / values.length;\n      const stdDev = Math.sqrt(variance);\n      \n      groupedStats[groupValue][field] = {\n        mean,\n        median,\n        min,\n        max,\n        sum,\n        count: values.length,\n        variance,\n        stdDev\n      };\n    });\n  });\n  \n  staticData[aggregationKey].groupedStats = groupedStats;\n}\n\n// Return the current aggregated state\nreturn {\n  json: {\n    ...$input.item.json,\n    aggregatedData: {\n      items: staticData[aggregationKey].items,\n      count: staticData[aggregationKey].items.length,\n      lastUpdated: staticData[aggregationKey].lastUpdated,\n      stats,\n      groups: staticData[aggregationKey].groups,\n      groupedStats: staticData[aggregationKey].groupedStats,\n      timeWindow\n    }\n  }\n};"
+      },
+      "name": "Statistical Aggregation",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [780, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Perform time-series aggregation\nconst data = $input.item.json.data;\nconst aggregationKey = $input.item.json.aggregationKey;\nconst timeWindow = $input.item.json.timeWindow;\nconst groupBy = $input.item.json.groupBy;\nconst maximumItems = $input.item.json.maximumItems;\n\n// Get or initialize static data for this aggregation key\nlet staticData = $getWorkflowStaticData(\"global\");\nif (!staticData[aggregationKey]) {\n  staticData[aggregationKey] = {\n    items: [],\n    timeseries: {},\n    lastUpdated: new Date().toISOString()\n  };\n}\n\n// Function to check if an item is within the time window\nfunction isWithinTimeWindow(timestamp, timeWindow) {\n  const itemDate = new Date(timestamp);\n  const now = new Date();\n  \n  // Calculate time window in milliseconds\n  let timeoutMs = 0;\n  if (timeWindow.seconds) timeoutMs += timeWindow.seconds * 1000;\n  if (timeWindow.minutes) timeoutMs += timeWindow.minutes * 60 * 1000;\n  if (timeWindow.hours) timeoutMs += timeWindow.hours * 60 * 60 * 1000;\n  if (timeWindow.days) timeoutMs += timeWindow.days * 24 * 60 * 60 * 1000;\n  \n  return (now.getTime() - itemDate.getTime()) <= timeoutMs;\n}\n\n// Trim old data outside the time window\nstaticData[aggregationKey].items = staticData[aggregationKey].items.filter(item => \n  isWithinTimeWindow(item.timestamp, timeWindow)\n);\n\n// Add new data with timestamp\nconst newItem = {\n  ...data,\n  timestamp: data.timestamp || new Date().toISOString()\n};\nstaticData[aggregationKey].items.push(newItem);\n\n// Trim to maximum items if needed\nif (staticData[aggregationKey].items.length > maximumItems) {\n  staticData[aggregationKey].items = staticData[aggregationKey].items.slice(-maximumItems);\n}\n\n// Update last updated timestamp\nstaticData[aggregationKey].lastUpdated = new Date().toISOString();\n\n// Process time-series data\nfunction buildTimeSeries(items, interval = 'minute') {\n  const series = {};\n  const numericFields = new Set();\n  \n  // Identify numeric fields\n  items.forEach(item => {\n    Object.entries(item).forEach(([key, value]) => {\n      if (typeof value === 'number' && key !== 'timestamp') {\n        numericFields.add(key);\n      }\n    });\n  });\n  \n  // Process each item into time buckets\n  items.forEach(item => {\n    let timeKey;\n    const timestamp = new Date(item.timestamp);\n    \n    // Create time key based on interval\n    switch(interval) {\n      case 'second':\n        timeKey = timestamp.toISOString().substring(0, 19);\n        break;\n      case 'minute':\n        timeKey = timestamp.toISOString().substring(0, 16) + ':00';\n        break;\n      case 'hour':\n        timeKey = timestamp.toISOString().substring(0, 13) + ':00:00';\n        break;\n      case 'day':\n        timeKey = timestamp.toISOString().substring(0, 10) + 'T00:00:00';\n        break;\n      default:\n        timeKey = timestamp.toISOString().substring(0, 16) + ':00';\n    }\n    \n    // Initialize time bucket if it doesn't exist\n    if (!series[timeKey]) {\n      series[timeKey] = {\n        count: 0,\n        sums: {},\n        mins: {},\n        maxes: {},\n        values: {}\n      };\n      \n      // Initialize arrays and values for each numeric field\n      numericFields.forEach(field => {\n        series[timeKey].sums[field] = 0;\n        series[timeKey].mins[field] = Infinity;\n        series[timeKey].maxes[field] = -Infinity;\n        series[timeKey].values[field] = [];\n      });\n    }\n    \n    // Update the bucket with this item's data\n    series[timeKey].count++;\n    \n    numericFields.forEach(field => {\n      const value = item[field];\n      if (typeof value === 'number') {\n        series[timeKey].sums[field] += value;\n        series[timeKey].mins[field] = Math.min(series[timeKey].mins[field], value);\n        series[timeKey].maxes[field] = Math.max(series[timeKey].maxes[field], value);\n        series[timeKey].values[field].push(value);\n      }\n    });\n  });\n  \n  // Calculate averages for each bucket\n  Object.keys(series).forEach(timeKey => {\n    const bucket = series[timeKey];\n    bucket.averages = {};\n    bucket.medians = {};\n    \n    numericFields.forEach(field => {\n      const values = bucket.values[field];\n      if (values.length > 0) {\n        // Calculate average\n        bucket.averages[field] = bucket.sums[field] / values.length;\n        \n        // Calculate median\n        const sorted = [...values].sort((a, b) => a - b);\n        const mid = Math.floor(sorted.length / 2);\n        bucket.medians[field] = sorted.length % 2 === 0\n          ? (sorted[mid - 1] + sorted[mid]) / 2\n          : sorted[mid];\n      }\n    });\n  });\n  \n  return {\n    interval,\n    timeKeys: Object.keys(series).sort(),\n    series,\n    fields: Array.from(numericFields)\n  };\n}\n\n// Build time series at different granularities\nstaticData[aggregationKey].timeseries = {\n  minute: buildTimeSeries(staticData[aggregationKey].items, 'minute'),\n  hour: buildTimeSeries(staticData[aggregationKey].items, 'hour'),\n  day: buildTimeSeries(staticData[aggregationKey].items, 'day')\n};\n\n// Return the time series aggregated data\nreturn {\n  json: {\n    ...$input.item.json,\n    aggregatedData: {\n      items: staticData[aggregationKey].items,\n      count: staticData[aggregationKey].items.length,\n      lastUpdated: staticData[aggregationKey].lastUpdated,\n      timeseries: staticData[aggregationKey].timeseries,\n      timeWindow\n    }\n  }\n};"
+      },
+      "name": "Time Series Aggregation",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [780, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Do a simple count-based aggregation\nconst data = $input.item.json.data;\nconst aggregationKey = $input.item.json.aggregationKey;\nconst timeWindow = $input.item.json.timeWindow;\nconst groupBy = $input.item.json.groupBy;\n\n// Get or initialize static data for this aggregation key\nlet staticData = $getWorkflowStaticData(\"global\");\nif (!staticData[aggregationKey]) {\n  staticData[aggregationKey] = {\n    counts: {},\n    lastUpdated: new Date().toISOString()\n  };\n}\n\n// Function to check if a timestamp is within the time window\nfunction isWithinTimeWindow(timestamp, timeWindow) {\n  const itemDate = new Date(timestamp);\n  const now = new Date();\n  \n  // Calculate time window in milliseconds\n  let timeoutMs = 0;\n  if (timeWindow.seconds) timeoutMs += timeWindow.seconds * 1000;\n  if (timeWindow.minutes) timeoutMs += timeWindow.minutes * 60 * 1000;\n  if (timeWindow.hours) timeoutMs += timeWindow.hours * 60 * 60 * 1000;\n  if (timeWindow.days) timeoutMs += timeWindow.days * 24 * 60 * 60 * 1000;\n  \n  return (now.getTime() - itemDate.getTime()) <= timeoutMs;\n}\n\n// Initialize counts if they don't exist\nif (!staticData[aggregationKey].counts.total) {\n  staticData[aggregationKey].counts.total = {\n    count: 0,\n    firstSeen: new Date().toISOString(),\n    lastSeen: new Date().toISOString()\n  };\n}\n\n// Initialize grouped counts if groupBy is specified\nif (groupBy) {\n  if (!staticData[aggregationKey].counts.byGroup) {\n    staticData[aggregationKey].counts.byGroup = {};\n  }\n  \n  // Function to get nested property value\n  function getPropertyValue(obj, path) {\n    return path.split('.').reduce((o, i) => o ? o[i] : undefined, obj);\n  }\n  \n  // Get the group value\n  const groupValue = getPropertyValue(data, groupBy);\n  \n  if (groupValue !== undefined) {\n    if (!staticData[aggregationKey].counts.byGroup[groupValue]) {\n      staticData[aggregationKey].counts.byGroup[groupValue] = {\n        count: 0,\n        firstSeen: new Date().toISOString(),\n        lastSeen: new Date().toISOString()\n      };\n    }\n    \n    // Update group count\n    staticData[aggregationKey].counts.byGroup[groupValue].count++;\n    staticData[aggregationKey].counts.byGroup[groupValue].lastSeen = new Date().toISOString();\n  }\n}\n\n// Update the total count\nstaticData[aggregationKey].counts.total.count++;\nstaticData[aggregationKey].counts.total.lastSeen = new Date().toISOString();\n\n// Update last updated timestamp\nstaticData[aggregationKey].lastUpdated = new Date().toISOString();\n\n// Return the current count state\nreturn {\n  json: {\n    ...$input.item.json,\n    aggregatedData: {\n      counts: staticData[aggregationKey].counts,\n      lastUpdated: staticData[aggregationKey].lastUpdated,\n      timeWindow\n    }\n  }\n};"
+      },
+      "name": "Count Aggregation",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [780, 700]
+    },
+    {
+      "parameters": {
+        "batchSize": 0,
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "aggregationType",
+              "value": "={{ $json.aggregationType }}"
+            },
+            {
+              "name": "aggregationKey",
+              "value": "={{ $json.aggregationKey }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ $json.timestamp }}"
+            }
+          ],
+          "object": [
+            {
+              "name": "aggregatedData",
+              "value": "={{ $json.aggregatedData }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Format Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [980, 400]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "data-processing-results",
+        "routingKey": "aggregation.result",
+        "content": "={{ JSON.stringify($json) }}",
+        "options": {
+          "persistent": true,
+          "contentType": "application/json",
+          "headers": {
+            "header": [
+              {
+                "name": "aggregation-type",
+                "value": "={{ $json.aggregationType }}"
+              },
+              {
+                "name": "aggregation-key",
+                "value": "={{ $json.aggregationKey }}"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Send Result",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [1180, 400],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "RabbitMQ Input": {
+      "main": [
+        [
+          {
+            "node": "Extract Message Properties",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Message Properties": {
+      "main": [
+        [
+          {
+            "node": "Determine Aggregation Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Aggregation Type": {
+      "append": [
+        [
+          {
+            "node": "Append Aggregation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "statistical": [
+        [
+          {
+            "node": "Statistical Aggregation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "timeseries": [
+        [
+          {
+            "node": "Time Series Aggregation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "count": [
+        [
+          {
+            "node": "Count Aggregation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Aggregation": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Statistical Aggregation": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Time Series Aggregation": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Count Aggregation": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Result": {
+      "main": [
+        [
+          {
+            "node": "Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": {},
+  "tags": ["data-processing", "aggregation"],
+  "pinData": {}
+}

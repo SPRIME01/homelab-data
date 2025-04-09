@@ -1,0 +1,499 @@
+{
+  "name": "Storage Cleanup & Optimization",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Configure storage paths and retention policies\nconst storageConfiguration = {\n  paths: [\n    {\n      path: '/data/logs',\n      retention: {\n        days: 30,\n        excludePatterns: ['*.gz', '*.log.*.zip'],\n        protectedFiles: ['system.log', 'sentry-reports'],\n        sizeLimitGB: 50\n      },\n      cleanupArchived: true\n    },\n    {\n      path: '/data/docker',\n      retention: {\n        days: null, // No time-based retention\n        excludePatterns: [],\n        protectedFiles: [],\n        sizeLimitGB: 100\n      },\n      cleanupArchived: true,\n      dockerPrune: true\n    },\n    {\n      path: '/data/downloads',\n      retention: {\n        days: 14,\n        excludePatterns: ['*.important.*'],\n        protectedFiles: [],\n        sizeLimitGB: 200\n      },\n      cleanupArchived: true\n    },\n    {\n      path: '/data/influxdb',\n      retention: {\n        days: 90,\n        excludePatterns: [],\n        protectedFiles: [],\n        sizeLimitGB: 50\n      },\n      cleanupArchived: false,\n      dbRetention: true\n    },\n    {\n      path: '/data/uploads',\n      retention: {\n        days: 60,\n        excludePatterns: ['*.protected.*'],\n        protectedFiles: [],\n        sizeLimitGB: 100\n      },\n      cleanupArchived: true\n    }\n  ],\n  databases: [\n    {\n      type: 'influxdb',\n      bucket: 'metrics',\n      retention: '30d',\n      downsampleConfig: {\n        enabled: true,\n        interval: '1h',\n        targetBucket: 'metrics_downsampled'\n      }\n    },\n    {\n      type: 'influxdb',\n      bucket: 'logs',\n      retention: '14d',\n      downsampleConfig: {\n        enabled: false\n      }\n    },\n    {\n      type: 'postgres',\n      database: 'n8n',\n      tables: [\n        { name: 'execution_entity', retention: { days: 30 } },\n        { name: 'workflow_statistics', retention: { days: 90 } }\n      ]\n    }\n  ],\n  docker: {\n    pruneImages: true,\n    pruneContainers: true,\n    pruneVolumes: false,\n    pruneNetworks: true,\n    pruneImagesKeepTagged: true,\n    removeOldImages: {\n      enabled: true,\n      keepLast: 3\n    }\n  },\n  globalSettings: {\n    dryRun: false,\n    minDiskSpacePercent: 15,\n    emergencyModeThresholdPercent: 5,\n    reportSizeThresholdMB: 100\n  }\n};\n\nreturn {\n  json: {\n    storageConfiguration,\n    timestamp: new Date().toISOString(),\n    executionId: 'cleanup-' + Date.now().toString(),\n    hostname: require('os').hostname()\n  }\n};"
+      },
+      "name": "Configure Cleanup Settings",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "command": "df -h | grep -v tmpfs | grep -v /dev/loop",
+        "executeDirectly": false
+      },
+      "name": "Check Disk Space",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 200]
+    },
+    {
+      "parameters": {
+        "command": "=find {{ $json.storageConfiguration.paths[0].path }} -type f -not -name \"{{ $json.storageConfiguration.paths[0].retention.protectedFiles.join('\" -not -name \"') }}\" -mtime +{{ $json.storageConfiguration.paths[0].retention.days }} -size +1M | wc -l",
+        "executeDirectly": false
+      },
+      "name": "Estimate Files to Clean",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [600, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Analyze disk usage and determine cleanup strategy\nconst diskOutput = $node['Check Disk Space'].json.stdout;\nconst fileEstimate = parseInt($node['Estimate Files to Clean'].json.stdout.trim()) || 0;\nconst config = $json.storageConfiguration;\n\n// Parse disk space information\nconst diskData = [];\nconst diskLines = diskOutput.trim().split('\\n');\ndiskLines.forEach(line => {\n  const parts = line.trim().split(/\\s+/);\n  if (parts.length >= 6) {\n    // Standard df -h output format: Filesystem, Size, Used, Avail, Use%, Mounted\n    const usagePercent = parseInt(parts[4].replace('%', ''));\n    diskData.push({\n      filesystem: parts[0],\n      size: parts[1],\n      used: parts[2],\n      available: parts[3],\n      usagePercent: usagePercent,\n      mountPoint: parts[5]\n    });\n  }\n});\n\n// Find critical filesystems (above warning threshold)\nconst criticalDisks = diskData.filter(disk => disk.usagePercent >= (100 - config.globalSettings.minDiskSpacePercent));\nconst emergencyDisks = diskData.filter(disk => disk.usagePercent >= (100 - config.globalSettings.emergencyModeThresholdPercent));\n\n// Determine cleanup mode based on disk status\nlet cleanupMode = 'normal';\nif (emergencyDisks.length > 0) {\n  cleanupMode = 'emergency';\n} else if (criticalDisks.length > 0) {\n  cleanupMode = 'aggressive';\n}\n\n// Configure cleanup operations based on mode\nconst pathsToClean = config.paths.map(path => {\n  // Deep clone to avoid modifying the original\n  const pathConfig = JSON.parse(JSON.stringify(path));\n  \n  // Adjust retention period based on cleanup mode\n  if (cleanupMode === 'aggressive' && pathConfig.retention.days) {\n    pathConfig.retention.days = Math.floor(pathConfig.retention.days / 2); // 50% reduction in aggressive mode\n  } else if (cleanupMode === 'emergency' && pathConfig.retention.days) {\n    pathConfig.retention.days = Math.floor(pathConfig.retention.days / 4); // 75% reduction in emergency mode\n    pathConfig.retention.excludePatterns = []; // Ignore exclude patterns in emergency mode\n  }\n  \n  // Match path to disk\n  const disk = diskData.find(d => pathConfig.path.startsWith(d.mountPoint));\n  pathConfig.disk = disk ? disk : null;\n  \n  return pathConfig;\n});\n\n// Similar adjustments for databases\nconst databasesToClean = config.databases.map(db => {\n  const dbConfig = JSON.parse(JSON.stringify(db));\n  \n  if (cleanupMode === 'aggressive' && db.type === 'influxdb') {\n    // Shorten retention periods in aggressive mode\n    dbConfig.retention = db.retention.replace(/([0-9]+)([dhm])/g, (match, num, unit) => {\n      return Math.floor(parseInt(num) / 2) + unit;\n    });\n  } else if (cleanupMode === 'emergency' && db.type === 'influxdb') {\n    // Even shorter retention in emergency mode\n    dbConfig.retention = db.retention.replace(/([0-9]+)([dhm])/g, (match, num, unit) => {\n      return Math.floor(parseInt(num) / 4) + unit;\n    });\n  } else if (db.type === 'postgres') {\n    // Adjust Postgres retention similarly\n    dbConfig.tables = db.tables.map(table => {\n      if (cleanupMode === 'aggressive' && table.retention.days) {\n        table.retention.days = Math.floor(table.retention.days / 2);\n      } else if (cleanupMode === 'emergency' && table.retention.days) {\n        table.retention.days = Math.floor(table.retention.days / 4);\n      }\n      return table;\n    });\n  }\n  \n  return dbConfig;\n});\n\n// Configure Docker cleanup based on mode\nconst dockerConfig = JSON.parse(JSON.stringify(config.docker));\nif (cleanupMode === 'aggressive' || cleanupMode === 'emergency') {\n  dockerConfig.pruneImagesKeepTagged = cleanupMode !== 'emergency';\n  if (dockerConfig.removeOldImages) {\n    dockerConfig.removeOldImages.keepLast = cleanupMode === 'emergency' ? 1 : 2;\n  }\n}\n\nreturn {\n  json: {\n    ...config,\n    diskAnalysis: {\n      disks: diskData,\n      criticalDisks,\n      emergencyDisks,\n      cleanupMode,\n      totalFilesToClean: fileEstimate\n    },\n    cleanupConfig: {\n      paths: pathsToClean,\n      databases: databasesToClean,\n      docker: dockerConfig,\n      dryRun: config.globalSettings.dryRun\n    },\n    executionId: $json.executionId,\n    timestamp: $json.timestamp\n  }\n};"
+      },
+      "name": "Analyze Storage Status",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [800, 300]
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "options": {},
+        "items": "={{ $json.cleanupConfig.paths }}"
+      },
+      "name": "Process Each Path",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [1000, 200]
+    },
+    {
+      "parameters": {
+        "command": "=find {{ $json.path }} -type f -not -path \"*/\\.*\" {{ $json.retention.protectedFiles.map(file => `-not -name \"${file}\"`).join(' ') }} {{ $json.retention.excludePatterns.map(pattern => `-not -name \"${pattern}\"`).join(' ') }} {{ $json.retention.days ? `-mtime +${$json.retention.days}` : '' }} -size +1M -delete {{ $json.dryRun ? '-print' : '' }}",
+        "executeDirectly": false
+      },
+      "name": "Clean Old Files",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1200, 200]
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "options": {},
+        "items": "={{ $json.cleanupConfig.databases.filter(db => db.type === 'influxdb') }}"
+      },
+      "name": "Process InfluxDB Cleanup",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [1000, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://influxdb.local:8086/api/v2/buckets/{{ $json.bucket }}/retention",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "queryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "org",
+              "value": "homelab"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={{ {\n  \"orgID\": \"homelab\",\n  \"shardGroupDuration\": \"1d\",\n  \"everySeconds\": $json.retention.includes('d') ? parseInt($json.retention.replace('d', '')) * 24 * 60 * 60 : \n                  ($json.retention.includes('h') ? parseInt($json.retention.replace('h', '')) * 60 * 60 : \n                   parseInt($json.retention.replace('m', '')) * 60)\n} }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Update InfluxDB Retention",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1200, 400],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "3",
+          "name": "InfluxDB Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "options": {},
+        "items": "={{ $json.cleanupConfig.databases.filter(db => db.type === 'postgres').flatMap(db => db.tables.map(table => ({ ...db, table }))) }}"
+      },
+      "name": "Process Postgres Cleanup",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [1000, 600]
+    },
+    {
+      "parameters": {
+        "command": "=PGPASSWORD=$POSTGRES_PASSWORD psql -h postgres.local -U postgres -d {{ $json.database }} -c \"DELETE FROM {{ $json.table.name }} WHERE created_at < NOW() - INTERVAL '{{ $json.table.retention.days }} days'{{ $json.dryRun ? ' RETURNING *' : '' }};\"",
+        "executeDirectly": false
+      },
+      "name": "Clean Postgres Tables",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1200, 600]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.cleanupConfig.docker.pruneImages }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Docker Cleanup Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1000, 800]
+    },
+    {
+      "parameters": {
+        "command": "=docker system prune {{ $json.cleanupConfig.docker.pruneVolumes ? '--volumes' : '' }} {{ $json.cleanupConfig.docker.pruneImagesKeepTagged ? '--all' : '' }} {{ $json.dryRun ? '--dry-run' : '-f' }}",
+        "executeDirectly": false
+      },
+      "name": "Docker System Prune",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1200, 800]
+    },
+    {
+      "parameters": {
+        "command": "df -h | grep -v tmpfs | grep -v /dev/loop",
+        "executeDirectly": false
+      },
+      "name": "Check Space After Cleanup",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1400, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Analyze cleanup results and generate report\nconst diskBefore = $node['Check Disk Space'].json.stdout;\nconst diskAfter = $node['Check Space After Cleanup'].json.stdout;\nconst config = $json.cleanupConfig;\nconst diskAnalysis = $json.diskAnalysis;\n\n// Helper function to parse disk usage from df output\nfunction parseDiskOutput(output) {\n  const diskData = [];\n  const diskLines = output.trim().split('\\n');\n  diskLines.forEach(line => {\n    const parts = line.trim().split(/\\s+/);\n    if (parts.length >= 6) {\n      const usagePercent = parseInt(parts[4].replace('%', ''));\n      diskData.push({\n        filesystem: parts[0],\n        size: parts[1],\n        used: parts[2],\n        available: parts[3],\n        usagePercent: usagePercent,\n        mountPoint: parts[5]\n      });\n    }\n  });\n  return diskData;\n}\n\n// Parse disk info before and after cleanup\nconst diskDataBefore = parseDiskOutput(diskBefore);\nconst diskDataAfter = parseDiskOutput(diskAfter);\n\n// Calculate disk space saved\nconst diskSpaceSaved = diskDataBefore.map(before => {\n  const after = diskDataAfter.find(d => d.mountPoint === before.mountPoint);\n  if (!after) return null;\n  \n  return {\n    mountPoint: before.mountPoint,\n    beforeUsage: before.usagePercent,\n    afterUsage: after.usagePercent,\n    changePercent: before.usagePercent - after.usagePercent,\n    beforeUsed: before.used,\n    afterUsed: after.used,\n    savedSpace: before.used !== after.used ? `${before.used} → ${after.used}` : 'No change'\n  };\n}).filter(Boolean);\n\n// Get cleanup actions from previous nodes\nlet fileCleanupResults = [];\nif ($node['Clean Old Files']?.json) {\n  const results = Array.isArray($node['Clean Old Files'].json) ? \n    $node['Clean Old Files'].json : \n    [$node['Clean Old Files'].json];\n    \n  fileCleanupResults = results.map(r => ({\n    path: r.path,\n    filesRemoved: config.dryRun ? 0 : (r.stdout?.split('\\n').length || 0),\n    output: r.stdout\n  }));\n}\n\nlet influxCleanupResults = [];\nif ($node['Update InfluxDB Retention']?.json) {\n  const results = Array.isArray($node['Update InfluxDB Retention'].json) ? \n    $node['Update InfluxDB Retention'].json : \n    [$node['Update InfluxDB Retention'].json];\n    \n  influxCleanupResults = results.map(r => ({\n    bucket: r.bucket,\n    retention: r.retention,\n    success: r.statusCode >= 200 && r.statusCode < 300\n  }));\n}\n\nlet postgresCleanupResults = [];\nif ($node['Clean Postgres Tables']?.json) {\n  const results = Array.isArray($node['Clean Postgres Tables'].json) ? \n    $node['Clean Postgres Tables'].json : \n    [$node['Clean Postgres Tables'].json];\n    \n  postgresCleanupResults = results.map(r => ({\n    database: r.database,\n    table: r.table.name,\n    rowsDeleted: (r.stdout?.match(/DELETE (\\d+)/) || [])[1] || 0,\n    success: r.exitCode === 0\n  }));\n}\n\nlet dockerCleanupResults = null;\nif ($node['Docker System Prune']?.json) {\n  const result = $node['Docker System Prune'].json;\n  dockerCleanupResults = {\n    success: result.exitCode === 0,\n    output: result.stdout,\n    spaceSaved: (result.stdout?.match(/reclaimed: ([\\d.]+[KMGT]?)B/) || [])[1] || 'Unknown'\n  };\n}\n\n// Generate overall summary\nconst totalSpaceSaved = diskSpaceSaved.reduce((total, disk) => total + disk.changePercent, 0) / diskSpaceSaved.length;\nconst successfulCleanups = [\n  fileCleanupResults.filter(r => r.filesRemoved > 0).length,\n  influxCleanupResults.filter(r => r.success).length,\n  postgresCleanupResults.filter(r => r.success).length,\n  dockerCleanupResults?.success ? 1 : 0\n].reduce((a, b) => a + b, 0);\n\nconst cleanupSummary = {\n  executionId: $json.executionId,\n  timestamp: new Date().toISOString(),\n  cleanupMode: diskAnalysis.cleanupMode,\n  dryRun: config.dryRun,\n  spaceSaved: {\n    disks: diskSpaceSaved,\n    averagePercentage: totalSpaceSaved.toFixed(2) + '%',\n    docker: dockerCleanupResults?.spaceSaved || 'N/A'\n  },\n  actionsPerformed: {\n    paths: fileCleanupResults.length,\n    influxDBBuckets: influxCleanupResults.length,\n    postgresTables: postgresCleanupResults.length,\n    dockerCleaned: dockerCleanupResults !== null\n  },\n  successRate: (successfulCleanups / (fileCleanupResults.length + influxCleanupResults.length + postgresCleanupResults.length + (dockerCleanupResults ? 1 : 0)) * 100).toFixed(2) + '%',\n  details: {\n    files: fileCleanupResults,\n    influxDB: influxCleanupResults,\n    postgres: postgresCleanupResults,\n    docker: dockerCleanupResults\n  }\n};\n\nreturn {\n  json: cleanupSummary\n};"
+      },
+      "name": "Generate Cleanup Report",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1600, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://observability-stack.monitoring.svc.cluster.local:8086/api/v2/write?org=homelab&bucket=maintenance&precision=ns",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Token {{$env.INFLUXDB_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ \n// Format data for InfluxDB line protocol\nconst data = $json;\nconst lines = [];\nconst timestamp = new Date(data.timestamp).getTime() * 1000000; // Convert to nanoseconds\n\n// Storage cleanup metrics\nlines.push(`storage_cleanup,host=${require('os').hostname()},mode=${data.cleanupMode},dry_run=${data.dryRun} success_rate=${parseFloat(data.successRate)},space_saved=${parseFloat(data.spaceSaved.averagePercentage)} ${timestamp}`);\n\n// Add disk metrics\ndata.spaceSaved.disks.forEach(disk => {\n  lines.push(`disk_usage,host=${require('os').hostname()},mount=${disk.mountPoint.replace(/\\//g, '_')} before=${disk.beforeUsage},after=${disk.afterUsage},saved=${disk.changePercent} ${timestamp}`);\n});\n\n// Add action counts\nlines.push(`cleanup_actions,host=${require('os').hostname()} files=${data.actionsPerformed.paths},influxdb=${data.actionsPerformed.influxDBBuckets},postgres=${data.actionsPerformed.postgresTables},docker=${data.actionsPerformed.dockerCleaned ? 1 : 0} ${timestamp}`);\n\nreturn lines.join('\\n');\n}}"
+            }
+          ]
+        }
+      },
+      "name": "Log Metrics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1800, 200]
+    },
+    {
+      "parameters": {
+        "operation": "publish",
+        "exchange": "homelab-notifications",
+        "routingKey": "system.storage",
+        "content": "={{ JSON.stringify({\n  \"title\": `Storage Cleanup ${$json.dryRun ? '(Dry Run)' : 'Completed'}`,\n  \"message\": `Storage cleanup ${$json.dryRun ? 'would save' : 'saved'} approximately ${$json.spaceSaved.averagePercentage} disk space in ${$json.cleanupMode} mode`,\n  \"severity\": \"info\",\n  \"component\": \"storage-cleanup\",\n  \"details\": {\n    \"timestamp\": $json.timestamp,\n    \"executionId\": $json.executionId,\n    \"mode\": $json.cleanupMode,\n    \"spaceFreed\": $json.spaceSaved,\n    \"dryRun\": $json.dryRun\n  },\n  \"actions\": [\n    { \"name\": \"View Storage Report\", \"url\": \"/admin/storage\" }\n  ]\n}) }}",
+        "options": {
+          "contentType": "application/json",
+          "persistent": true
+        }
+      },
+      "name": "Send Cleanup Notification",
+      "type": "n8n-nodes-rabbitmq-enhanced.rabbitMqEnhanced",
+      "typeVersion": 1,
+      "position": [1800, 400],
+      "credentials": {
+        "rabbitMqEnhanced": {
+          "id": "1",
+          "name": "RabbitMQ Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/states/sensor.storage_cleanup_status",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"state\": \"{{ $json.spaceSaved.averagePercentage }}\",\n  \"attributes\": {\n    \"friendly_name\": \"Storage Cleanup\",\n    \"icon\": \"mdi:harddisk-remove\",\n    \"last_run\": \"{{ $json.timestamp }}\",\n    \"mode\": \"{{ $json.cleanupMode }}\",\n    \"success_rate\": \"{{ $json.successRate }}\",\n    \"actions_performed\": {{ JSON.stringify($json.actionsPerformed) }},\n    \"space_freed\": {{ $json.dryRun ? '\"Dry run - no actual changes\"' : $json.spaceSaved.averagePercentage }}\n  }\n}"
+            }
+          ]
+        }
+      },
+      "name": "Update Home Assistant Entity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1800, 600]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Configure Cleanup Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configure Cleanup Settings": {
+      "main": [
+        [
+          {
+            "node": "Check Disk Space",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Estimate Files to Clean",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Disk Space": {
+      "main": [
+        [
+          {
+            "node": "Analyze Storage Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Estimate Files to Clean": {
+      "main": [
+        [
+          {
+            "node": "Analyze Storage Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Storage Status": {
+      "main": [
+        [
+          {
+            "node": "Process Each Path",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Process InfluxDB Cleanup",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Process Postgres Cleanup",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Docker Cleanup Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Each Path": {
+      "main": [
+        [
+          {
+            "node": "Clean Old Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean Old Files": {
+      "main": [
+        [
+          {
+            "node": "Check Space After Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process InfluxDB Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Update InfluxDB Retention",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update InfluxDB Retention": {
+      "main": [
+        [
+          {
+            "node": "Check Space After Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Postgres Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Clean Postgres Tables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean Postgres Tables": {
+      "main": [
+        [
+          {
+            "node": "Check Space After Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Docker Cleanup Needed?": {
+      "true": [
+        [
+          {
+            "node": "Docker System Prune",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Docker System Prune": {
+      "main": [
+        [
+          {
+            "node": "Check Space After Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Space After Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Generate Cleanup Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Cleanup Report": {
+      "main": [
+        [
+          {
+            "node": "Log Metrics",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Cleanup Notification",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Update Home Assistant Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": {},
+  "tags": ["maintenance", "storage", "cleanup"],
+  "pinData": {}
+}

@@ -1,0 +1,612 @@
+{
+  "name": "User Presence & Personalization",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 30
+            }
+          ]
+        }
+      },
+      "name": "Check Presence Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://homeassistant.local:8123/api/states",
+        "authentication": "headerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        }
+      },
+      "name": "Get Home Assistant States",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract presence information from Home Assistant states\nconst states = $input.item.json;\n\n// Define user devices to track\nconst userDevices = [\n  { userId: 'john', deviceEntities: ['device_tracker.john_phone', 'device_tracker.john_watch'] },\n  { userId: 'jane', deviceEntities: ['device_tracker.jane_phone', 'device_tracker.jane_tablet'] },\n  { userId: 'guest', deviceEntities: ['device_tracker.guest_device'] },\n];\n\n// Extract room presence sensors\nconst roomSensors = states.filter(state => \n  state.entity_id.startsWith('binary_sensor.') && \n  state.attributes && \n  (state.attributes.device_class === 'occupancy' || state.attributes.device_class === 'motion') &&\n  state.attributes.room_name\n);\n\n// Group room sensors by room\nconst roomPresence = {};\nroomSensors.forEach(sensor => {\n  const roomName = sensor.attributes.room_name;\n  if (!roomPresence[roomName]) {\n    roomPresence[roomName] = { occupied: false, sensors: [] };\n  }\n  \n  roomPresence[roomName].sensors.push({\n    entity_id: sensor.entity_id,\n    state: sensor.state,\n    last_changed: sensor.last_changed\n  });\n  \n  // If any sensor is 'on', the room is occupied\n  if (sensor.state === 'on') {\n    roomPresence[roomName].occupied = true;\n  }\n});\n\n// Determine each user's presence\nconst userPresence = {};\nuserDevices.forEach(user => {\n  const userDeviceStates = user.deviceEntities.map(entityId => \n    states.find(state => state.entity_id === entityId)\n  ).filter(Boolean);\n  \n  // Check if any of the user's devices are home\n  const isHome = userDeviceStates.some(state => state.state === 'home');\n  \n  // Get last seen info\n  const lastChanged = userDeviceStates.map(state => new Date(state.last_changed));\n  const lastSeen = lastChanged.length > 0 ? new Date(Math.max(...lastChanged)) : null;\n  \n  userPresence[user.userId] = {\n    isHome,\n    lastSeen: lastSeen ? lastSeen.toISOString() : null,\n    deviceStates: userDeviceStates.map(state => ({\n      entity_id: state.entity_id,\n      state: state.state,\n      last_changed: state.last_changed\n    }))\n  };\n});\n\n// Find occupied rooms for each user by examining recent motion and location-based devices\nconst userLocations = {};\nObject.keys(userPresence).forEach(userId => {\n  if (userPresence[userId].isHome) {\n    // For now, use a simplistic approach - first occupied room or default to 'unknown'\n    const occupiedRooms = Object.keys(roomPresence).filter(room => roomPresence[room].occupied);\n    userLocations[userId] = occupiedRooms.length > 0 ? occupiedRooms[0] : 'unknown';\n  } else {\n    userLocations[userId] = 'away';\n  }\n});\n\n// Check if home occupancy state has changed\nlet homeOccupancyChanged = false;\nconst isHomeOccupied = Object.values(userPresence).some(user => user.isHome);\nconst lastHomeState = $getWorkflowStaticData('global').lastHomeState;\n\nif (lastHomeState !== isHomeOccupied) {\n  homeOccupancyChanged = true;\n  $setWorkflowStaticData('global', { lastHomeState: isHomeOccupied });\n}\n\nreturn {\n  json: {\n    timestamp: new Date().toISOString(),\n    userPresence,\n    userLocations,\n    roomPresence,\n    isHomeOccupied,\n    homeOccupancyChanged,\n    occupiedRooms: Object.keys(roomPresence).filter(room => roomPresence[room].occupied)\n  }\n};"
+      },
+      "name": "Extract Presence Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.homeOccupancyChanged }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Home Occupancy Changed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [800, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/services/input_boolean/turn_{{ $json.isHomeOccupied ? 'on' : 'off' }}",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={ \"entity_id\": \"input_boolean.home_occupied\" }"
+            }
+          ]
+        }
+      },
+      "name": "Update Home Occupied Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1000, 200]
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "options": {},
+        "items": "={{ Object.keys($json.userPresence).map(userId => ({ userId, ...($json.userPresence[userId]), location: $json.userLocations[userId] })) }}"
+      },
+      "name": "Process Each User",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [800, 500]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/states/sensor.user_{{ $json.userId }}_presence",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"state\": \"{{ $json.isHome ? 'home' : 'away' }}\",\n  \"attributes\": {\n    \"friendly_name\": \"{{ $json.userId.charAt(0).toUpperCase() + $json.userId.slice(1) }} Presence\",\n    \"icon\": \"{{ $json.isHome ? 'mdi:account-check' : 'mdi:account-off' }}\",\n    \"last_seen\": \"{{ $json.lastSeen }}\",\n    \"tracked_devices\": {{ JSON.stringify($json.deviceStates.map(d => d.entity_id)) }},\n    \"current_location\": \"{{ $json.location }}\",\n    \"last_updated\": \"{{ $now() }}\"\n  }\n}"
+            }
+          ]
+        }
+      },
+      "name": "Update User Presence Entity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1000, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Create personalized settings based on user presence\nconst userId = $input.item.json.userId;\nconst location = $input.item.json.location;\nconst isHome = $input.item.json.isHome;\n\n// Skip if user is away\nif (!isHome || location === 'away') {\n  return {\n    json: {\n      ...$input.item.json,\n      personalization: null,\n      applyPersonalization: false,\n      reason: 'User is away'\n    }\n  };\n}\n\n// Define user preferences\nconst userPreferences = {\n  john: {\n    lightBrightness: 80,\n    lightColor: 'neutral',\n    temperatureC: 21,\n    musicGenre: 'rock',\n    volumeLevel: 40\n  },\n  jane: {\n    lightBrightness: 60,\n    lightColor: 'warm',\n    temperatureC: 22.5,\n    musicGenre: 'jazz',\n    volumeLevel: 30\n  },\n  guest: {\n    lightBrightness: 70,\n    lightColor: 'neutral',\n    temperatureC: 21.5,\n    musicGenre: 'pop',\n    volumeLevel: 35\n  }\n};\n\n// Get user's preferences or use defaults\nconst preferences = userPreferences[userId] || userPreferences.guest;\n\n// Define room entities mapping\nconst roomEntities = {\n  living_room: {\n    lights: ['light.living_room_main', 'light.living_room_accent'],\n    thermostat: 'climate.living_room',\n    media_player: 'media_player.living_room_speaker'\n  },\n  kitchen: {\n    lights: ['light.kitchen_main', 'light.kitchen_counter'],\n    thermostat: 'climate.kitchen',\n    media_player: 'media_player.kitchen_speaker'\n  },\n  bedroom: {\n    lights: ['light.bedroom_main', 'light.bedroom_nightstand'],\n    thermostat: 'climate.bedroom',\n    media_player: 'media_player.bedroom_speaker'\n  },\n  office: {\n    lights: ['light.office_main', 'light.office_desk'],\n    thermostat: 'climate.office',\n    media_player: 'media_player.office_speaker'\n  }\n};\n\n// Get room configuration or use empty defaults\nconst roomConfig = roomEntities[location] || { lights: [], thermostat: null, media_player: null };\n\n// Create personalization settings\nconst personalization = {\n  userId,\n  roomName: location,\n  applyLighting: roomConfig.lights.length > 0,\n  lightSettings: {\n    entities: roomConfig.lights,\n    brightness: preferences.lightBrightness,\n    color: preferences.lightColor,\n    transition: 2 // seconds\n  },\n  applyClimate: !!roomConfig.thermostat,\n  climateSettings: {\n    entity: roomConfig.thermostat,\n    temperature: preferences.temperatureC\n  },\n  applyMedia: !!roomConfig.media_player,\n  mediaSettings: {\n    entity: roomConfig.media_player,\n    volume: preferences.volumeLevel / 100,\n    genre: preferences.musicGenre\n  }\n};\n\n// Check if we should apply personalization\n// Only apply if user has been in the room for a few minutes to avoid rapid changes\nconst lastLocationUpdate = $getWorkflowStaticData('global')[`lastLocation_${userId}`] || {};\nconst applyPersonalization = \n  lastLocationUpdate.room !== location || \n  (new Date().getTime() - new Date(lastLocationUpdate.timestamp || 0).getTime() > 5 * 60 * 1000);\n\n// Update user's last location\n$setWorkflowStaticData('global', {\n  ...($getWorkflowStaticData('global') || {}),\n  [`lastLocation_${userId}`]: {\n    room: location,\n    timestamp: new Date().toISOString()\n  }\n});\n\nreturn {\n  json: {\n    ...$input.item.json,\n    personalization,\n    applyPersonalization,\n    reason: applyPersonalization ? 'User location changed or sufficient time elapsed' : 'User recently entered room'\n  }\n};"
+      },
+      "name": "Generate Personalization",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1200, 500]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.applyPersonalization }}",
+              "operation": "true"
+            }
+          ],
+          "string": [
+            {
+              "value1": "={{ $json.personalization }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Should Apply Personalization?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1400, 500]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.personalization.applyLighting }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Apply Lighting?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1600, 300]
+    },
+    {
+      "parameters": {
+        "operation": "parallel",
+        "batchSize": 1,
+        "options": {},
+        "items": "={{ $json.personalization.lightSettings.entities }}"
+      },
+      "name": "Process Each Light",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [1800, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/services/light/turn_on",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"entity_id\": \"{{ $json }}\",\n  \"brightness\": {{ Math.floor($node[\"Generate Personalization\"].json.personalization.lightSettings.brightness * 2.55) }},\n  \"color_temp\": {{ $node[\"Generate Personalization\"].json.personalization.lightSettings.color === 'warm' ? 400 : ($node[\"Generate Personalization\"].json.personalization.lightSettings.color === 'cool' ? 250 : 325) }},\n  \"transition\": {{ $node[\"Generate Personalization\"].json.personalization.lightSettings.transition }}\n}"
+            }
+          ]
+        }
+      },
+      "name": "Set Light Preferences",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.personalization.applyClimate }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Apply Climate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1600, 500]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/services/climate/set_temperature",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"entity_id\": \"{{ $json.personalization.climateSettings.entity }}\",\n  \"temperature\": {{ $json.personalization.climateSettings.temperature }},\n  \"hvac_mode\": \"auto\"\n}"
+            }
+          ]
+        }
+      },
+      "name": "Set Climate Preferences",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1800, 500]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.personalization.applyMedia }}",
+              "value2": true,
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "Apply Media?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1600, 700]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/services/media_player/volume_set",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"entity_id\": \"{{ $json.personalization.mediaSettings.entity }}\",\n  \"volume_level\": {{ $json.personalization.mediaSettings.volume }}\n}"
+            }
+          ]
+        }
+      },
+      "name": "Set Media Volume",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1800, 700]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/services/media_player/play_media",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"entity_id\": \"{{ $json.personalization.mediaSettings.entity }}\",\n  \"media_content_id\": \"spotify:playlist:{{ \n    $json.personalization.mediaSettings.genre === 'rock' ? '37i9dQZF1DWXRqgorJj26U' : \n    ($json.personalization.mediaSettings.genre === 'jazz' ? '37i9dQZF1DX5wgKYQVRARv' : \n    '37i9dQZF1DXcBWIGoYBM5M') }}\",\n  \"media_content_type\": \"playlist\"\n}"
+            }
+          ]
+        }
+      },
+      "name": "Set Media Content",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2000, 700]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://homeassistant.local:8123/api/states/sensor.personalization_status",
+        "authentication": "headerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HASS_TOKEN}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "JSON",
+              "value": "={\n  \"state\": \"active\",\n  \"attributes\": {\n    \"friendly_name\": \"Personalization Status\",\n    \"icon\": \"mdi:account-cog\",\n    \"active_users\": {{ JSON.stringify(Object.keys($node[\"Extract Presence Data\"].json.userPresence).filter(u => $node[\"Extract Presence Data\"].json.userPresence[u].isHome)) }},\n    \"user_locations\": {{ JSON.stringify($node[\"Extract Presence Data\"].json.userLocations) }},\n    \"occupied_rooms\": {{ JSON.stringify($node[\"Extract Presence Data\"].json.occupiedRooms) }},\n    \"last_personalization\": { \n      \"user\": \"{{ $json.userId }}\", \n      \"room\": \"{{ $json.personalization?.roomName }}\",\n      \"timestamp\": \"{{ $now() }}\"\n    }\n  }\n}"
+            }
+          ]
+        }
+      },
+      "name": "Update Status Entity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2200, 500]
+    }
+  ],
+  "connections": {
+    "Check Presence Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Home Assistant States",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Home Assistant States": {
+      "main": [
+        [
+          {
+            "node": "Extract Presence Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Presence Data": {
+      "main": [
+        [
+          {
+            "node": "Home Occupancy Changed?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Process Each User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Home Occupancy Changed?": {
+      "true": [
+        [
+          {
+            "node": "Update Home Occupied Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Each User": {
+      "main": [
+        [
+          {
+            "node": "Update User Presence Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update User Presence Entity": {
+      "main": [
+        [
+          {
+            "node": "Generate Personalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Personalization": {
+      "main": [
+        [
+          {
+            "node": "Should Apply Personalization?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Apply Personalization?": {
+      "true": [
+        [
+          {
+            "node": "Apply Lighting?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Apply Climate?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Apply Media?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Lighting?": {
+      "true": [
+        [
+          {
+            "node": "Process Each Light",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Each Light": {
+      "main": [
+        [
+          {
+            "node": "Set Light Preferences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Climate?": {
+      "true": [
+        [
+          {
+            "node": "Set Climate Preferences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Media?": {
+      "true": [
+        [
+          {
+            "node": "Set Media Volume",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Media Volume": {
+      "main": [
+        [
+          {
+            "node": "Set Media Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Light Preferences": {
+      "main": [
+        [
+          {
+            "node": "Update Status Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Climate Preferences": {
+      "main": [
+        [
+          {
+            "node": "Update Status Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Media Content": {
+      "main": [
+        [
+          {
+            "node": "Update Status Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler"
+  },
+  "staticData": {
+    "global": {
+      "lastHomeState": false
+    }
+  },
+  "tags": ["automation", "presence", "personalization"],
+  "pinData": {}
+}

@@ -1,0 +1,81 @@
+name: n8n Workflow Integration Tests
+
+on:
+  push:
+    paths:
+      - 'homelab-data/n8n/workflows/**'
+      - 'homelab-data/n8n/tests/**'
+    branches: [ main, staging, develop ]
+  pull_request:
+    paths:
+      - 'homelab-data/n8n/workflows/**'
+      - 'homelab-data/n8n/tests/**'
+    branches: [ main, staging ]
+  workflow_dispatch:
+    inputs:
+      test_filter:
+        description: 'Test category filter (leave empty for all)'
+        required: false
+        default: ''
+
+jobs:
+  integration-tests:
+    name: Run Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r homelab-data/n8n/tests/requirements.txt
+
+      - name: Setup Mock Services
+        run: |
+          python homelab-data/n8n/tests/setup_mock_services.py --config homelab-data/n8n/tests/integration-tests/config.yaml
+
+      - name: Run All Integration Tests
+        if: github.event.inputs.test_filter == ''
+        run: |
+          python homelab-data/n8n/tests/workflow-testing-framework.py \
+            --config homelab-data/n8n/tests/integration-tests/config.yaml \
+            --tests-dir homelab-data/n8n/tests/integration-tests \
+            --output-dir test-reports \
+            --verbose
+
+      - name: Run Filtered Integration Tests
+        if: github.event.inputs.test_filter != ''
+        run: |
+          python homelab-data/n8n/tests/workflow-testing-framework.py \
+            --config homelab-data/n8n/tests/integration-tests/config.yaml \
+            --tests-dir homelab-data/n8n/tests/integration-tests \
+            --output-dir test-reports \
+            --pattern "*${{ github.event.inputs.test_filter }}*" \
+            --verbose
+
+      - name: Upload Test Reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-reports
+          path: test-reports/
+          retention-days: 14
+
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: test-reports/junit/*.xml
+
+      - name: Create Test Summary
+        run: |
+          echo "## Integration Test Results" >> $GITHUB_STEP_SUMMARY
+          python homelab-data/n8n/tests/generate_test_summary.py \
+            --input-dir test-reports \
+            --format github-markdown >> $GITHUB_STEP_SUMMARY
