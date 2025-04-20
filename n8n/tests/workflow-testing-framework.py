@@ -25,6 +25,8 @@ import shutil
 import subprocess
 import importlib.util
 import psutil
+import pytest
+import aiohttp
 
 # Configure logging
 logging.basicConfig(
