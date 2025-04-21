@@ -187,13 +187,20 @@ class N8nBackup:
             bucket = self.config['storage']['s3']['bucket']
             key = f"n8n-backups/{backup_path.name}"
 
-            self.s3_client.upload_file(
-                str(backup_path),
-                bucket,
-                key,
-                ExtraArgs={'ServerSideEncryption': 'AES256'}
-            )
-            return True
+            for attempt in range(3):
+                try:
+                    self.s3_client.upload_file(
+                        str(backup_path),
+                        bucket,
+                        key,
+                        ExtraArgs={'ServerSideEncryption': 'AES256'}
+                    )
+                    return True
+                except ClientError as e:
+                    logger.error(f"S3 upload attempt {attempt + 1} failed: {e}")
+                    time.sleep(5)  # Wait before retrying
+
+            return False
         except Exception as e:
             logger.error(f"S3 upload failed: {e}")
             return False

@@ -226,14 +226,28 @@ class DataArchiver:
             # Generate object path
             object_name = self._get_object_path(queue_name, timestamp)
 
-            # Upload to MinIO
-            self.minio_client.put_object(
-                bucket_name=archive_config['bucket'],
-                object_name=object_name,
-                data=compressed_data,
-                length=len(compressed_data),
-                metadata=metadata
-            )
+            # Upload to MinIO with retry logic
+            retries = 0
+            max_retries = self.config['error_handling'].get('max_retries', 3)
+            retry_delay = self.config['error_handling'].get('retry_delay', 5)
+
+            while retries < max_retries:
+                try:
+                    self.minio_client.put_object(
+                        bucket_name=archive_config['bucket'],
+                        object_name=object_name,
+                        data=compressed_data,
+                        length=len(compressed_data),
+                        metadata=metadata
+                    )
+                    break
+                except Exception as e:
+                    retries += 1
+                    logger.error(f"Failed to upload to MinIO (attempt {retries}/{max_retries}): {e}")
+                    if retries < max_retries:
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        raise
 
             # Update metrics
             MESSAGES_ARCHIVED.labels(queue=queue_name,
