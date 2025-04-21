@@ -642,6 +642,10 @@ class InferenceHandler:
                 context_id = message["context_id"]
                 logger.debug(f"Request with context ID: {context_id}")
 
+            # Validate context ID if present
+            if context_id and not isinstance(context_id, str):
+                raise ValueError("Invalid context ID format")
+
             # Create inference request
             request = InferenceRequest(
                 request_id=message.get('request_id', str(uuid.uuid4())),

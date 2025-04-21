@@ -1221,8 +1221,9 @@ class RabbitMQMock(BaseMock):
             while True:
                 client, _ = self.server.accept()
                 client.close()  # Very basic simulation, just accept and close
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error running RabbitMQ mock server: {e}")
+            self.stop()
 
     def stop(self) -> None:
         """Stop the RabbitMQ mock server."""
