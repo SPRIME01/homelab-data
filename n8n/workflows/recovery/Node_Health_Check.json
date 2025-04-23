@@ -1,0 +1,162 @@
+{
+  "name": "Node Health Check",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "id": "start-node-health"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "value": 15 // Run every 15 minutes
+            }
+          ]
+        }
+      },
+      "name": "Cron Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ],
+      "id": "cron-node-health"
+    },
+    {
+      "parameters": {
+        "command": "=python3 ../../homelab-infra/scripts/recovery/recover_node.py", // Adjust path
+        "executeIn": "execProcess",
+        "options": {
+          "env": { // Pass ALERT_COMMAND if you want n8n to handle alerts instead of the script
+            // "ALERT_COMMAND": "echo 'Alert handled by n8n'"
+          }
+        }
+      },
+      "name": "Execute Node Check Script",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ],
+      "continueOnFail": true, // Allow workflow to continue even if script exits non-zero
+      "id": "exec-node-health"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            { // Check if the previous node failed (script exited non-zero)
+              "value1": "{{$node[\"Execute Node Check Script\"].error}}",
+              "operation": "exists"
+            }
+          ]
+        }
+      },
+      "name": "Node(s) Unhealthy?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        850,
+        300
+      ],
+      "id": "if-node-unhealthy"
+    },
+    {
+      "parameters": { // Placeholder for notification if script failed
+        "subject": "🚨 Node Health Check Alert",
+        "text": "Node health check script detected issues. Check script logs and Kubernetes nodes.\n\nOutput:\n{{$node[\"Execute Node Check Script\"].json.stderr}}",
+        "options": {}
+      },
+      "name": "Notify Node Issue",
+      "type": "n8n-nodes-base.email", // Replace with desired notification node
+      "typeVersion": 1,
+      "position": [
+        1050,
+        200 // True branch
+      ],
+      "id": "notify-node-issue"
+    },
+    {
+      "parameters": { // Placeholder for logging success
+        "message": "Node health check completed successfully.",
+        "options": {}
+      },
+      "name": "Log Success",
+      "type": "n8n-nodes-base.noOp", // Use NoOp for simple logging or replace with actual logging node
+      "typeVersion": 1,
+      "position": [
+        1050,
+        400 // False branch
+      ],
+      "id": "log-node-success"
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Cron Trigger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cron Trigger": {
+      "main": [
+        [
+          {
+            "node": "Execute Node Check Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Node Check Script": {
+      "main": [
+        [
+          {
+            "node": "Node(s) Unhealthy?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Node(s) Unhealthy?": {
+      "main": [ // True output
+        [
+          {
+            "node": "Notify Node Issue",
+            "type": "main",
+            "index": 0
+          }
+        ], // False output
+        [
+          {
+            "node": "Log Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "id": "generate-unique-id-node-health"
+}

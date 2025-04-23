@@ -1,0 +1,217 @@
+{
+  "name": "Service Recovery Orchestration",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "id": "5dfcf3ff-4e0a-4a7a-adf0-7cce6911a1c7"
+    },
+    {
+      "parameters": {
+        "path": "webhook/service-recovery-trigger",
+        "options": {}
+      },
+      "name": "Webhook Trigger (Alertmanager/Manual)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ],
+      "webhookId": "generate-a-unique-id-here",
+      "id": "a1b2c3d4-e5f6-7890-1234-567890abcdef"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "value1": "{{$json.body.alertname}}", // Example: Check alert name or manual trigger flag
+              "operation": "contains",
+              "value2": "UnhealthyService"
+            }
+          ]
+        }
+      },
+      "name": "Is Service Unhealthy Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ],
+      "id": "b2c3d4e5-f6a7-8901-2345-67890abcdef0"
+    },
+    {
+      "parameters": {
+        "command": "=python3 ../../homelab-infra/scripts/recovery/recover_service.py", // Adjust path relative to n8n execution dir
+        "executeIn": "execProcess",
+        "options": {
+          "env": { // Pass alert details as env vars
+            "TARGET_SERVICES": "{{$node[\"Webhook Trigger (Alertmanager/Manual)\"].json.body.namespace}}/{{$node[\"Webhook Trigger (Alertmanager/Manual)\"].json.body.service_name}}"
+          }
+        }
+      },
+      "name": "Execute Service Recovery Script",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        850,
+        200 // True branch
+      ],
+      "id": "c3d4e5f6-a7b8-9012-3456-7890abcdef01"
+    },
+    {
+      "parameters": {
+        "command": "=kubectl get deployment {{$node[\"Webhook Trigger (Alertmanager/Manual)\"].json.body.service_name}} -n {{$node[\"Webhook Trigger (Alertmanager/Manual)\"].json.body.namespace}} -o jsonpath='{.status.readyReplicas}/{.spec.replicas}'",
+        "executeIn": "execProcess",
+        "options": {}
+      },
+      "name": "Validate Service Readiness",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        200
+      ],
+      "id": "d4e5f6a7-b8c9-0123-4567-890abcdef012"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [ // Check if output indicates readiness (e.g., "1/1")
+            {
+              "value1": "{{$node[\"Validate Service Readiness\"].json.stdout}}",
+              "operation": "isNotEmpty" // Basic check, refine based on actual output
+            }
+          ]
+        }
+      },
+      "name": "Is Service Ready?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        200
+      ],
+      "id": "e5f6a7b8-c9d0-1234-5678-90abcdef0123"
+    },
+    {
+      "parameters": { // Placeholder for success notification
+        "subject": "✅ Service Recovery Successful: {{$node[\"Webhook Trigger (Alertmanager/Manual)\"].json.body.service_name}}",
+        "text": "Service {{$node[\"Webhook Trigger (Alertmanager/Manual)\"].json.body.service_name}} in namespace {{$node[\"Webhook Trigger (Alertmanager/Manual)\"].json.body.namespace}} recovered successfully.",
+        "options": {}
+      },
+      "name": "Notify Success",
+      "type": "n8n-nodes-base.email", // Replace with desired notification node
+      "typeVersion": 1,
+      "position": [
+        1450,
+        100 // True branch
+      ],
+      "id": "f6a7b8c9-d0e1-2345-6789-0abcdef01234"
+    },
+    {
+      "parameters": { // Placeholder for failure notification
+        "subject": "❌ Service Recovery FAILED: {{$node[\"Webhook Trigger (Alertmanager/Manual)\"].json.body.service_name}}",
+        "text": "Service {{$node[\"Webhook Trigger (Alertmanager/Manual)\"].json.body.service_name}} in namespace {{$node[\"Webhook Trigger (Alertmanager/Manual)\"].json.body.namespace}} failed to recover. Check logs.",
+        "options": {}
+      },
+      "name": "Notify Failure",
+      "type": "n8n-nodes-base.email", // Replace with desired notification node
+      "typeVersion": 1,
+      "position": [
+        1450,
+        300 // False branch
+      ],
+      "id": "a7b8c9d0-e1f2-3456-7890-abcdef012345"
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Webhook Trigger (Alertmanager/Manual)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Trigger (Alertmanager/Manual)": {
+      "main": [
+        [
+          {
+            "node": "Is Service Unhealthy Alert?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Service Unhealthy Alert?": {
+      "main": [ // True output
+        [
+          {
+            "node": "Execute Service Recovery Script",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [] // False output (optional: add logging/notification for ignored alerts)
+      ]
+    },
+    "Execute Service Recovery Script": {
+      "main": [
+        [
+          {
+            "node": "Validate Service Readiness",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Service Readiness": {
+      "main": [
+        [
+          {
+            "node": "Is Service Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Service Ready?": {
+      "main": [ // True output
+        [
+          {
+            "node": "Notify Success",
+            "type": "main",
+            "index": 0
+          }
+        ], // False output
+        [
+          {
+            "node": "Notify Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "id": "generate-another-unique-id"
+}
