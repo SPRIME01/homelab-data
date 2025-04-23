@@ -137,6 +137,9 @@ class InfluxDBConsumer:
 
         for rp in retention_policies:
             try:
+                if 'name' not in rp or 'database' not in rp or 'duration' not in rp:
+                    raise ValueError(f"Invalid retention policy configuration: {rp}")
+
                 query = f"""CREATE RETENTION POLICY "{rp['name']}"
                            ON "{rp['database']}"
                            DURATION {rp['duration']}

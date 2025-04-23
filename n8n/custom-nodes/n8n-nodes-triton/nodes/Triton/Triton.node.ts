@@ -314,6 +314,15 @@ export class Triton implements INodeType {
             );
           }
 
+          // Validate input data
+          if (!Array.isArray(inputData)) {
+            throw new NodeOperationError(
+              this.getNode(),
+              `Input data must be an array`,
+              { itemIndex: i }
+            );
+          }
+
           // Parse input shape if provided
           let inputShape: number[] | undefined;
           if (inputShapeStr) {

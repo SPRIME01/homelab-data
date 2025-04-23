@@ -237,7 +237,23 @@ export class HomeAssistantEnhanced implements INodeType {
             operation: Array<{ type: string; config: string }>;
           };
           result = await Promise.all(
-            operations.operation.map(op => apiHandler.executeBatchOperation(op))
+            operations.operation.map(async (op) => {
+              try {
+                return await apiHandler.executeBatchOperation(op);
+              } catch (error) {
+                // Retry logic for failed API calls
+                for (let attempt = 1; attempt <= 3; attempt++) {
+                  try {
+                    return await apiHandler.executeBatchOperation(op);
+                  } catch (retryError) {
+                    if (attempt === 3) {
+                      throw retryError;
+                    }
+                    await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+                  }
+                }
+              }
+            })
           );
           break;
         }

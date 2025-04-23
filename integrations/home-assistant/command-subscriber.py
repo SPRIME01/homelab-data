@@ -82,7 +82,7 @@ class HACommandSubscriber:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
 
-            required_keys = ['rabbitmq', 'home_assistant', 'queues']
+            required_keys = ['rabbitmq', 'home_assistant', 'queues', 'webhook', 'logging', 'retry_config', 'monitoring', 'security']
             for key in required_keys:
                 if key not in config:
                     raise ValueError(f"Missing required configuration section: {key}")
