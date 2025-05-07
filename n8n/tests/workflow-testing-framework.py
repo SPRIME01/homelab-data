@@ -690,7 +690,7 @@ class N8nWorkflowTester:
                 if not node_validation['success']:
                     validation_result['success'] = False
                     validation_result['errors'].extend([
-                        f"Node {node_name}: {error}" for error in node_validation['errors']
+                        f"{key}.{error}" for key, error in node_validation['errors'].items()
                     ])
 
         # If we expect specific final output

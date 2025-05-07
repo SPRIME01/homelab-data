@@ -89,7 +89,7 @@ class N8nBackup:
             )
             response.raise_for_status()
             return response.json()
-        except Exception as e:
+        except requests.RequestException as e:
             logger.error(f"Failed to fetch workflows: {e}")
             return []
 
@@ -145,8 +145,10 @@ class N8nBackup:
         """Get n8n version from the API."""
         try:
             response = requests.get(f"{self.n8n_api_url}/version")
+            response.raise_for_status()
             return response.json()['version']
-        except:
+        except requests.RequestException as e:
+            logger.error(f"Failed to get n8n version: {e}")
             return 'unknown'
 
     def _compress_backup(self, backup_path: Path, timestamp: str) -> Path:
