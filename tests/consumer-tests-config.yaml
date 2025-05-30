@@ -10,13 +10,13 @@ rabbitmq:
   retry_delay: 5
 
 # Schema validation
-schemas_dir: "/home/sprime01/homelab/homelab-data/schemas"
+schemas_dir: "schemas"
 
 # Test data location
-test_data_dir: "/home/sprime01/homelab/homelab-data/tests/test_data"
+test_data_dir: "tests/test_data"
 
 # Output directory for test results
-output_dir: "/home/sprime01/homelab/homelab-data/tests/results"
+output_dir: "tests/results"
 
 # Prometheus metrics server port
 prometheus_port: 9091
