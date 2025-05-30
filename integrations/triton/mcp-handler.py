@@ -37,7 +37,11 @@ class ModelContextManager:
     """Manages conversation contexts for models using Redis."""
 
     def __init__(self, config: Dict[str, Any]):
-        """Initialize with configuration."""
+        """
+        Initializes the ModelContextManager with configuration settings.
+        
+        Sets up parameters for context TTL, Redis key prefix, maximum context size, and constructs the Redis connection URL. The Redis client is not connected during initialization and must be established asynchronously.
+        """
         self.config = config
         # self.redis_client is now initialized in an async method
         self.redis_client: Optional[aioredis.Redis] = None
@@ -47,7 +51,15 @@ class ModelContextManager:
         self.redis_url = self._construct_redis_url(config.get("context_store", {}))
 
     def _construct_redis_url(self, redis_config: Dict[str, Any]) -> str:
-        """Constructs Redis URL from configuration."""
+        """
+        Builds a Redis connection URL string from the provided configuration dictionary.
+        
+        Args:
+            redis_config: Dictionary containing Redis connection parameters such as host, port, password, and database.
+        
+        Returns:
+            A Redis URL string suitable for use with async Redis clients.
+        """
         host = redis_config.get("host", "localhost")
         port = redis_config.get("port", 6379)
         password = redis_config.get("password")
@@ -58,7 +70,12 @@ class ModelContextManager:
         return f"redis://{host}:{port}/{db}"
 
     async def connect_redis(self) -> None:
-        """Connect to Redis."""
+        """
+        Asynchronously establishes a connection to the Redis server.
+        
+        Raises:
+            Exception: If the connection to Redis fails.
+        """
         if self.redis_client is None:
             try:
                 self.redis_client = await aioredis.from_url(self.redis_url, decode_responses=True)
@@ -69,7 +86,9 @@ class ModelContextManager:
                 raise
 
     async def close_redis(self) -> None:
-        """Close Redis connection."""
+        """
+        Closes the Redis connection asynchronously and resets the Redis client reference.
+        """
         if self.redis_client:
             try:
                 await self.redis_client.close()
@@ -82,11 +101,22 @@ class ModelContextManager:
 
 
     def _get_key(self, context_id: str) -> str:
-        """Get Redis key for a context ID."""
+        """
+        Returns the Redis key corresponding to the given context ID by applying the configured key prefix.
+        """
         return f"{self.key_prefix}{context_id}"
 
     async def create_context(self, model_name: str, metadata: Optional[Dict[str, Any]] = None) -> str:
-        """Create a new conversation context."""
+        """
+        Creates and stores a new conversation context in Redis.
+        
+        Args:
+            model_name: The name of the model associated with the context.
+            metadata: Optional metadata to associate with the context.
+        
+        Returns:
+            The unique ID of the newly created conversation context.
+        """
         if not self.redis_client: await self.connect_redis()
         assert self.redis_client is not None # For type checker
 
@@ -107,7 +137,15 @@ class ModelContextManager:
         return context_id
 
     async def get_context(self, context_id: str) -> Optional[ConversationContext]:
-        """Retrieve a conversation context by ID."""
+        """
+        Retrieves a conversation context from Redis by its context ID.
+        
+        Args:
+            context_id: The unique identifier of the conversation context.
+        
+        Returns:
+            The corresponding ConversationContext if found, or None if not found or on error.
+        """
         if not self.redis_client: await self.connect_redis()
         assert self.redis_client is not None 
 
@@ -125,7 +163,11 @@ class ModelContextManager:
             return None
 
     async def save_context(self, context: ConversationContext) -> bool:
-        """Save conversation context."""
+        """
+        Saves a conversation context to Redis with a time-to-live (TTL).
+        
+        Updates the context's `updated_at` timestamp, serializes it to JSON, checks for size limits, and stores it in Redis with the configured TTL. Returns `True` if the operation succeeds, or `False` if the context exceeds the maximum allowed size or an error occurs.
+        """
         if not self.redis_client: await self.connect_redis()
         assert self.redis_client is not None
 
@@ -149,7 +191,20 @@ class ModelContextManager:
     async def update_context(self, context_id: str,
                              user_input: str, model_output: str,
                              metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """Update context with new conversation turn."""
+        """
+                             Updates an existing conversation context with a new user and model turn.
+                             
+                             Adds a new entry to the conversation history, increments the turn count, and updates metadata if provided.
+                             
+                             Args:
+                                 context_id: The unique identifier of the conversation context to update.
+                                 user_input: The user's input for this turn.
+                                 model_output: The model's output for this turn.
+                                 metadata: Optional dictionary of additional metadata to merge into the context.
+                             
+                             Returns:
+                                 True if the context was successfully updated and saved; False if the context does not exist or saving fails.
+                             """
         context = await self.get_context(context_id)
         if not context:
             logger.warning(f"Context {context_id} not found for update")
@@ -171,7 +226,15 @@ class ModelContextManager:
         return await self.save_context(context)
 
     async def delete_context(self, context_id: str) -> bool:
-        """Delete a conversation context."""
+        """
+        Deletes a conversation context from Redis by its context ID.
+        
+        Args:
+            context_id: The unique identifier of the conversation context to delete.
+        
+        Returns:
+            True if the context was successfully deleted, False otherwise.
+        """
         if not self.redis_client: await self.connect_redis()
         assert self.redis_client is not None
 
@@ -184,7 +247,12 @@ class ModelContextManager:
             return False
 
     async def list_contexts(self, model_name: Optional[str] = None) -> List[str]:
-        """List all context IDs, optionally filtered by model."""
+        """
+        Lists all conversation context IDs stored in Redis, optionally filtering by model name.
+        
+        If a model name is provided, only context IDs associated with that model are returned.
+        Returns an empty list if an error occurs.
+        """
         if not self.redis_client: await self.connect_redis()
         assert self.redis_client is not None
         
@@ -211,7 +279,9 @@ class ModelContextManager:
             return []
 
     async def cleanup_expired_contexts(self) -> int:
-        """Cleanup function (Redis handles TTL automatically)."""
+        """
+        Placeholder for cleaning up expired contexts; returns 0 as Redis TTL manages expiration automatically.
+        """
         # Redis handles TTL automatically for keys set with EX/PX.
         # This method could be used for more complex cleanup logic if needed in the future.
         logger.debug("Redis handles TTL automatically for context keys.")
@@ -219,7 +289,15 @@ class ModelContextManager:
 
 # Example usage (modified to be async)
 async def process_mcp_request(request: Dict[str, Any], context_manager: ModelContextManager) -> Dict[str, Any]:
-    """Process a request with Model Context Protocol."""
+    """
+    Processes a Model Context Protocol (MCP) request asynchronously, ensuring a valid conversation context exists, updating it with the latest user input and model output, and returning a response payload containing context information and the generated output.
+    
+    Args:
+        request: The MCP request dictionary containing at least 'inputs' and optionally 'context_id' and 'model_name'.
+    
+    Returns:
+        A dictionary with the context ID, model name, whether the context is new, the current turn number, and the generated model output.
+    """
     if not context_manager.redis_client: # Ensure connected
         await context_manager.connect_redis()
 
@@ -255,6 +333,11 @@ async def process_mcp_request(request: Dict[str, Any], context_manager: ModelCon
     return result_payload
 
 async def main_test(): # Renamed to avoid conflict if this file is imported
+    """
+    Asynchronously tests the ModelContextManager by performing context creation, update, retrieval, listing, MCP request processing, and deletion.
+    
+    Demonstrates end-to-end usage of the context manager with Redis, including explicit connection management and error handling. Prints results of each operation for verification.
+    """
     test_config = {
         "context_ttl_seconds": 3600,
         "context_store": {

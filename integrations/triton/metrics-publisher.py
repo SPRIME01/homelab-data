@@ -37,7 +37,11 @@ class MetricConfig:
 
 class TritonMetricsPublisher:
     def __init__(self, config_path: str = "config.yaml"):
-        """Initialize the metrics publisher."""
+        """
+        Initializes the Triton metrics publisher with configuration and runtime state.
+        
+        Loads configuration from the specified YAML file, sets up placeholders for RabbitMQ and HTTP connections, initializes the event loop, prepares metrics configuration, and creates synchronization primitives for connection management.
+        """
         self.config = self._load_config(config_path)
         self.connection: Optional[aio_pika.RobustConnection] = None
         self.channel: Optional[aio_pika.Channel] = None
@@ -51,7 +55,17 @@ class TritonMetricsPublisher:
 
 
     def _load_config(self, config_path: str) -> Dict:
-        """Load configuration from YAML file."""
+        """
+        Loads and validates configuration from a YAML file.
+        
+        Reads the specified YAML file, ensuring required sections ('rabbitmq', 'triton', 'metrics') and the 'exchange' key within 'rabbitmq' are present. Exits the program if the configuration is invalid or missing required keys.
+        
+        Args:
+            config_path: Path to the YAML configuration file.
+        
+        Returns:
+            A dictionary containing the loaded configuration.
+        """
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
@@ -67,7 +81,12 @@ class TritonMetricsPublisher:
             sys.exit(1)
 
     def _setup_metrics_config(self) -> Dict[str, MetricConfig]:
-        """Set up metrics configuration from config file."""
+        """
+        Parses the metrics collection configuration and returns a mapping of metric names to MetricConfig objects.
+        
+        Returns:
+            A dictionary where each key is a metric name and each value is a MetricConfig instance representing the configuration for that metric.
+        """
         metrics_cfg = {}
         for metric in self.config['metrics'].get('collect', []):
             metrics_cfg[metric['name']] = MetricConfig(
@@ -78,10 +97,24 @@ class TritonMetricsPublisher:
         return metrics_cfg
 
     async def _signal_handler_async(self, signum: int) -> None:
+        """
+        Handles termination signals asynchronously by setting the exit flag for graceful shutdown.
+        
+        Args:
+            signum: The signal number received.
+        """
         logger.info(f"Received signal {signum}, initiating shutdown...")
         self.should_exit = True
 
     async def connect_rabbitmq(self) -> bool:
+        """
+        Attempts to establish an asynchronous connection to RabbitMQ with retry logic.
+        
+        Returns:
+            True if the connection and exchange declaration succeed, False otherwise.
+        
+        This method uses a lock to prevent concurrent connection attempts and retries the connection up to the configured maximum number of attempts, waiting between retries. If already connected, it returns immediately. Returns False if the maximum number of attempts is reached or shutdown is initiated.
+        """
         if self._connection_retry_lock.locked():
             logger.debug("RabbitMQ connection attempt already in progress.")
             return False
@@ -130,7 +163,9 @@ class TritonMetricsPublisher:
 
 
     async def setup_http_session(self) -> None:
-        """Set up HTTP session for Triton metrics endpoint."""
+        """
+        Initializes an aiohttp ClientSession for communicating with the Triton metrics endpoint if one does not already exist or is closed.
+        """
         if self.session is None or self.session.closed:
             # You might want to pass connector_owner=False if session is managed outside this class instance
             self.session = aiohttp.ClientSession(loop=self.loop) 
@@ -138,7 +173,11 @@ class TritonMetricsPublisher:
 
 
     async def collect_metrics(self) -> List[Dict]:
-        """Collect metrics from Triton server."""
+        """
+        Fetches and parses metrics from the Triton server's Prometheus endpoint.
+        
+        Attempts to retrieve metrics using an HTTP GET request, parses the response into metric families, and filters them based on the configured metrics. Extracts relevant labels, computes deltas for counters, and includes optional descriptions and aggregation settings. Returns a list of metric dictionaries ready for publishing. Returns an empty list if the HTTP session is unavailable or if any error occurs during collection or parsing.
+        """
         if not self.session or self.session.closed:
             # This indicates an issue, as setup_http_session should be called first
             logger.error("aiohttp session not available or closed. Attempting to set up.")
@@ -184,7 +223,11 @@ class TritonMetricsPublisher:
 
 
     async def publish_metrics(self, metrics: List[Dict]) -> None:
-        """Publish metrics to RabbitMQ."""
+        """
+        Publishes a list of metrics to RabbitMQ as JSON messages.
+        
+        Attempts to reconnect to RabbitMQ if the channel is unavailable. Each metric is published to the configured exchange with a routing key based on its type and name. Logs errors for individual message failures and handles channel closure by marking the channel as unusable for future attempts.
+        """
         if self.should_exit or not metrics:
             return
 
@@ -229,7 +272,11 @@ class TritonMetricsPublisher:
 
 
     async def run(self) -> None:
-        """Run the metrics publisher."""
+        """
+        Runs the main asynchronous loop for collecting and publishing Triton metrics.
+        
+        Continuously collects metrics from the Triton server and publishes them to RabbitMQ at the configured interval. Ensures required connections are established before each cycle and handles graceful shutdown when the exit flag is set.
+        """
         await self.setup_http_session() # Setup session once at start
 
         collection_interval = self.config['metrics'].get('collection_interval', 15)
@@ -259,6 +306,11 @@ class TritonMetricsPublisher:
 
 
     async def stop(self): # Added explicit stop method
+        """
+        Performs a graceful shutdown of the metrics publisher.
+        
+        Closes the HTTP client session and RabbitMQ connection if they are open, and sets the exit flag to stop the main loop.
+        """
         logger.info("Stopping metrics publisher...")
         self.should_exit = True # Ensure exit flag is set
         if self.session and not self.session.closed:
@@ -271,6 +323,12 @@ class TritonMetricsPublisher:
 
 
 async def main_async():
+    """
+    Runs the asynchronous Triton metrics publisher with graceful shutdown and error handling.
+    
+    Initializes the publisher from configuration, registers signal handlers for termination,
+    executes the main publishing loop, and ensures resources are cleaned up on exit.
+    """
     config_path = os.environ.get('CONFIG_PATH', 'config.yaml')
     publisher = TritonMetricsPublisher(config_path)
 
