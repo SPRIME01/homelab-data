@@ -127,18 +127,20 @@ class HACommandSubscriber:
                 # Let's assume self.config['queues']['commands'] is a list of queue objects to declare
                 # And self.config['queues']['results'] is the config for the results queue.
                 
-                for queue_config in self.config['queues'].get('commands', []): # Assuming 'commands' is a list of queues to consume from
-                    queue_name = queue_config['name']
-                    await self.channel.declare_queue(
-                        name=queue_name,
-                        durable=True,
-                        arguments={
-                            'x-message-ttl': queue_config.get('ttl', 60000),
-                            'x-max-priority': queue_config.get('max_priority', 10)
-                        }
-                    )
-                    logger.info(f"Declared queue: {queue_name}")
+def _load_config(...):
+    # … existing setup …
 
+    # Normalise: ensure commands is always a list for downstream loops
+    q = config['queues']
+    if 'commands' not in q or 'results' not in q:
+        raise ValueError("Missing 'commands' or 'results' queue configuration.")
+
+    if isinstance(q['commands'], dict):
+        q['commands'] = [q['commands']]
+    elif not isinstance(q['commands'], list):
+        raise ValueError("'queues.commands' must be a list or a mapping")
+
+    # … rest of _load_config …
                 # Declare results queue as well, if it's defined and needs declaration by subscriber
                 results_queue_config = self.config['queues'].get('results')
                 if results_queue_config and results_queue_config.get('name'):
