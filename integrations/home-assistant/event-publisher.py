@@ -37,6 +37,11 @@ class EventBatch:
 
 class HAEventPublisher:
     def __init__(self, config_path: str = "config.yaml"):
+        """
+        Initializes the event publisher service with configuration, connection placeholders, and batching structures.
+        
+        Loads configuration from the specified YAML file, sets up placeholders for RabbitMQ connection and channel, initializes batching and synchronization primitives, and prepares internal state for event processing.
+        """
         self.config = self.load_config(config_path)
         self.connection: Optional[aio_pika.RobustConnection] = None # Typed
         self.channel: Optional[aio_pika.Channel] = None # Typed
@@ -52,7 +57,17 @@ class HAEventPublisher:
 
 
     def load_config(self, config_path: str) -> Dict:
-        """Load configuration from YAML file."""
+        """
+        Loads and validates configuration from a YAML file.
+        
+        Reads the specified YAML configuration file, ensuring that required sections and RabbitMQ settings are present. Exits the process if loading or validation fails.
+        
+        Args:
+            config_path: Path to the YAML configuration file.
+        
+        Returns:
+            A dictionary containing the validated configuration data.
+        """
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
@@ -69,12 +84,23 @@ class HAEventPublisher:
             sys.exit(1)
 
     async def signal_handler_async(self, signum: int) -> None: # Made async
-        """Handle shutdown signals."""
+        """
+        Handles shutdown signals by setting the shutdown flag.
+        
+        Sets the internal flag to initiate a graceful shutdown when a termination signal is received.
+        """
         logger.info(f"Received signal {signum}, initiating shutdown...")
         self.should_exit = True
 
     async def connect_rabbitmq(self) -> bool: # Return bool for success
-        """Establish connection to RabbitMQ with retry logic."""
+        """
+        Establishes an asynchronous connection to RabbitMQ with retry logic.
+        
+        Attempts to connect to RabbitMQ using configuration parameters, retrying up to a maximum number of attempts if the connection fails. Declares all configured exchanges upon successful connection. Prevents concurrent connection attempts and returns True if the connection is established, or False if the maximum number of attempts is reached or a shutdown is requested.
+        
+        Returns:
+            True if the connection is successfully established, False otherwise.
+        """
         # Prevent multiple concurrent connection attempts
         if self._connection_retry_lock.locked():
             logger.debug("Connection attempt already in progress.")
@@ -135,7 +161,11 @@ class HAEventPublisher:
             return False # Loop exited due to should_exit or max_attempts
 
     async def publish_event(self, event_data: Dict, exchange_name: str, routing_key: str) -> None:
-        """Publish event to RabbitMQ."""
+        """
+        Publishes an event to a specified RabbitMQ exchange with the given routing key.
+        
+        If the RabbitMQ connection or channel is unavailable, attempts to reconnect before publishing. On channel closure during publishing, retries the operation once after reconnection. Logs errors if publishing fails or if shutdown is in progress.
+        """
         if self.should_exit:
             logger.warning("Shutdown in progress, not publishing event.")
             return
@@ -177,7 +207,12 @@ class HAEventPublisher:
             # Consider more specific error handling or re-raising if critical
 
     def get_routing_info(self, event: Dict) -> Tuple[str, str]:
-        """Determine exchange and routing key based on event type."""
+        """
+        Determines the RabbitMQ exchange and routing key for an event based on its type.
+        
+        Examines the event's `event_type` and matches it against routing rules in the configuration.
+        If no specific rule matches, returns the default exchange and routing key pattern.
+        """
         event_type = event.get('event_type', '')
         domain = event_type.split('.')[0] if '.' in event_type else 'default'
 
@@ -198,7 +233,11 @@ class HAEventPublisher:
         )
 
     async def add_to_batch(self, event: Dict) -> None:
-        """Add event to appropriate batch."""
+        """
+        Adds an event to the batch corresponding to its exchange and routing key.
+        
+        If no batch exists for the event's routing information, a new batch is created. The event is appended to the batch, and the batch's last update timestamp is refreshed.
+        """
         exchange_name, routing_key = self.get_routing_info(event)
         batch_key = f"{exchange_name}:{routing_key}"
 
@@ -212,7 +251,11 @@ class HAEventPublisher:
             batch.last_update = time.time()
 
     async def process_batches(self) -> None:
-        """Process event batches periodically."""
+        """
+        Periodically processes and publishes event batches based on size or timeout thresholds.
+        
+        For each batch, if the configured batch size or timeout is reached, publishes the events to RabbitMQ as a batch or single event. Cleans up empty batches after publishing. Runs continuously until a shutdown signal is received.
+        """
         batch_processing_interval = self.config['rabbitmq'].get('batch_process_interval', 1) # seconds
         while not self.should_exit:
             try:
@@ -261,7 +304,11 @@ class HAEventPublisher:
 
 
     async def handle_webhook(self, request: web.Request) -> web.Response:
-        """Handle incoming webhooks from Home Assistant."""
+        """
+        Handles incoming HTTP POST requests from the Home Assistant webhook, validates and enriches the event payload, and enqueues it for batching and publishing.
+        
+        Parses the JSON body, ensures the presence of an `event_type`, adds metadata fields, and returns appropriate HTTP responses for success or error conditions.
+        """
         try:
             event = await request.json()
             if not isinstance(event, dict) or 'event_type' not in event:
@@ -280,7 +327,11 @@ class HAEventPublisher:
             return web.Response(status=500, text="Internal Server Error")
 
     async def start_server(self) -> None:
-        """Start the event publisher service components."""
+        """
+        Starts the event publisher service, including RabbitMQ connection, batch processing, and the webhook HTTP server.
+        
+        Initializes the RabbitMQ connection, launches the batch processing task, and sets up the aiohttp web server to receive incoming events. The server runs until a shutdown signal is received.
+        """
         if not await self.connect_rabbitmq():
             logger.error("Failed to connect to RabbitMQ during startup. Exiting.")
             self.should_exit = True
@@ -305,6 +356,11 @@ class HAEventPublisher:
             await asyncio.sleep(1)
 
     async def stop_server(self) -> None:
+        """
+        Stops the event publisher service and performs cleanup.
+        
+        Cancels the batch processing task, stops the webhook server, and closes the RabbitMQ connection if open. Ensures all resources are released and logs each shutdown step.
+        """
         logger.info("Stopping event publisher service...")
         if hasattr(self, 'batch_processor_task') and self.batch_processor_task:
             self.batch_processor_task.cancel()
@@ -327,7 +383,11 @@ class HAEventPublisher:
 
 
 async def main_async(): # Renamed to avoid conflict
-    """Main async entry point."""
+    """
+    Asynchronous entry point for starting the event publisher service.
+    
+    Initializes the event publisher with configuration, sets up signal handlers for graceful shutdown, starts the server, and ensures clean shutdown on exit or error.
+    """
     config_path = os.environ.get('CONFIG_PATH', 'config.yaml')
     publisher = HAEventPublisher(config_path)
 

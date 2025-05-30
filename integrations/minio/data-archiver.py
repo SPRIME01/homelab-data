@@ -80,7 +80,11 @@ class DataArchiver:
     """Archives messages from RabbitMQ to MinIO."""
 
     def __init__(self, config_path: str):
-        """Initialize the archiver with configuration."""
+        """
+        Initializes the DataArchiver with the provided configuration file.
+        
+        Loads configuration settings and prepares internal state for connections, batching, and event loop management.
+        """
         self.config = self._load_config(config_path)
         self.connection: Optional[aio_pika.RobustConnection] = None
         self.channel: Optional[aio_pika.Channel] = None
@@ -91,7 +95,17 @@ class DataArchiver:
 
 
     def _load_config(self, config_path: str) -> Dict:
-        """Load configuration from YAML file."""
+        """
+        Loads and validates configuration from a YAML file.
+        
+        Reads the specified YAML file, parses its contents, and ensures that the required sections ('rabbitmq', 'minio', and 'archival') are present. Exits the application if loading or validation fails.
+        
+        Args:
+            config_path: Path to the YAML configuration file.
+        
+        Returns:
+            A dictionary containing the loaded configuration.
+        """
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
@@ -108,7 +122,12 @@ class DataArchiver:
             sys.exit(1)
 
     async def setup(self):
-        """Set up connections and initialize storage."""
+        """
+        Asynchronously establishes connections to RabbitMQ and MinIO, and ensures required storage buckets are configured.
+        
+        Raises:
+            Exception: If connection to RabbitMQ or MinIO fails, or if bucket setup encounters an error.
+        """
         self.loop = asyncio.get_running_loop()
         # Connect to RabbitMQ
         try:
@@ -146,7 +165,13 @@ class DataArchiver:
             raise
 
     async def _setup_buckets(self):
-        """Set up MinIO buckets with lifecycle policies."""
+        """
+        Ensures MinIO buckets exist and applies lifecycle policies for retention and tiering.
+        
+        For each archive configuration, creates the bucket if it does not exist and sets up
+        lifecycle rules for data expiration and storage class transitions based on the provided
+        retention and tiering settings.
+        """
         if not self.minio_client:
             raise ConnectionError("MinIO client not initialized")
 
@@ -187,14 +212,22 @@ class DataArchiver:
 
 
     def _get_object_path(self, queue_name: str) -> str: # Removed timestamp argument
-        """Generate object path based on partitioning strategy using current UTC time."""
+        """
+        Generates an object storage path for a queue using the current UTC time for partitioning.
+        
+        The path format is: `{queue_name}/YYYY/MM/DD/HH/messages_<timestamp>.json.zst`, where `<timestamp>` is the current UTC epoch time in seconds.
+        """
         # Use UTC for partitioning to avoid timezone issues
         timestamp_utc = datetime.utcnow() # Use current UTC time
         return f"{queue_name}/{timestamp_utc.year}/{timestamp_utc.month:02d}/{timestamp_utc.day:02d}/{timestamp_utc.hour:02d}/" + \
                f"messages_{int(timestamp_utc.timestamp())}.json.zst" # Use int for timestamp
 
     async def _archive_batch(self, queue_name: str, batch: MessageBatch):
-        """Archive a batch of messages to MinIO."""
+        """
+        Archives a batch of messages from a specified queue to MinIO object storage.
+        
+        The batch is serialized as JSON, compressed with Zstandard, and uploaded to the configured MinIO bucket. Uploads are retried on failure according to configuration. Prometheus metrics for archived messages and storage usage are updated upon success. The batch is cleared after successful archival.
+        """
         if not batch.messages or not self.minio_client or not self.loop:
             return
 
@@ -260,7 +293,11 @@ class DataArchiver:
             logger.error(f"Failed to archive batch from {queue_name}: {e}", exc_info=True)
 
     async def _process_message(self, message: aio_pika.IncomingMessage):
-        """Process a single message."""
+        """
+        Processes a single RabbitMQ message, batching it for archival or handling errors.
+        
+        If the message's queue is configured for archival, adds the message to the appropriate batch and archives the batch if full. Acknowledges messages on success, rejects malformed JSON messages without requeue, and nacks other errors without requeue.
+        """
         async with message.process(ignore_processed=True): # Auto ack/nack based on context
             queue_name = message.routing_key or message.exchange # Fallback if routing_key is None
 
@@ -295,7 +332,11 @@ class DataArchiver:
                 await message.nack(requeue=False) # Nack without requeue on other errors
 
     async def run(self):
-        """Run the archiver."""
+        """
+        Starts the main asynchronous loop for the data archiver service.
+        
+        Initializes connections, sets up Prometheus metrics, begins consuming messages from configured RabbitMQ queues, and periodically checks and archives message batches. Handles graceful shutdown and resource cleanup on exit or fatal errors.
+        """
         self.loop = asyncio.get_running_loop()
         try:
             await self.setup()
@@ -332,7 +373,11 @@ class DataArchiver:
             logger.info("Archiver shutdown complete.")
 
 def main():
-    """Main entry point."""
+    """
+    Parses command-line arguments, initializes the DataArchiver, and runs the archiving service.
+    
+    Handles graceful shutdown on keyboard interruption and logs critical errors before exiting.
+    """
     import argparse
     parser = argparse.ArgumentParser(description='RabbitMQ Data Archiver')
     parser.add_argument('--config', '-c', type=str, default='config.yaml', help='Path to configuration file')

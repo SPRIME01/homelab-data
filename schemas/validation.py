@@ -415,17 +415,11 @@ class SchemaEnforcer:
 
     def _attempt_fix_message(self, message: Dict, schema_id: str,
                            version: str, error: ValidationError) -> Dict:
-        """Attempt to fix common validation issues in a message.
-
-        Args:
-            message: The invalid message
-            schema_id: Schema ID
-            version: Schema version
-            error: The validation error
-
-        Returns:
-            Fixed message
         """
+                           Attempts to automatically fix common validation issues in a message based on schema requirements.
+                           
+                           Tries to resolve missing required fields by adding default values and inserts a current timestamp if needed. Returns a new, fixed message dictionary.
+                           """
         fixed_message = copy.deepcopy(message) # Changed to deepcopy
         schema = self.registry.get_schema(schema_id, version)
 
