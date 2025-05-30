@@ -840,16 +840,14 @@ export class RabbitMqEnhanced implements INodeType {
                   options.contentEncoding = 'gzip';
                   break;
                 case 'encrypt':
+                case 'encrypt':
                   const encryptionKeyPublish = this.getNodeParameter('encryptionKey', i) as string;
                   if (!encryptionKeyPublish) {
                     throw new NodeOperationError(this.getNode(), 'Encryption key is required for "encrypt" transformation.', { itemIndex: i });
                   }
                   messageContent = await transformer.encrypt(messageContent, encryptionKeyPublish);
-                  const encryptionKeyPublishToQueue = this.getNodeParameter('encryptionKey', i) as string;
-                  if (!encryptionKeyPublishToQueue) {
-                    throw new NodeOperationError(this.getNode(), 'Encryption key is required for "encrypt" transformation.', { itemIndex: i });
-                  }
-                  messageContent = await transformer.encrypt(messageContent, encryptionKeyPublishToQueue);
+                  options.contentEncoding = 'encrypted';
+                  break;
                   options.contentEncoding = 'encrypted';
                   break;
                 case 'function':
