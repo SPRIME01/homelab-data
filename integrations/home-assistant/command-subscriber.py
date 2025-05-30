@@ -68,7 +68,11 @@ class CommandResult:
 
 class HACommandSubscriber:
     def __init__(self, config_path: str = "config.yaml"):
-        """Initialize the command subscriber."""
+        """
+        Initializes the HACommandSubscriber with configuration, connection placeholders, and state.
+        
+        Loads configuration from the specified YAML file, sets up placeholders for RabbitMQ connection, channel, and HTTP session, and initializes internal state for command results and consumer task tracking.
+        """
         self.config = self._load_config(config_path)
         self.connection: Optional[aio_pika.RobustConnection] = None # Typed
         self.channel: Optional[aio_pika.Channel] = None # Typed
@@ -78,7 +82,17 @@ class HACommandSubscriber:
         self._consuming_tasks = [] # To keep track of consumer tasks
 
     def _load_config(self, config_path: str) -> Dict:
-        """Load configuration from YAML file."""
+        """
+        Loads and validates the service configuration from a YAML file.
+        
+        Ensures that required sections ('rabbitmq', 'home_assistant', and 'queues') and the 'commands' and 'results' queues are present in the configuration. Exits the process if loading or validation fails.
+        
+        Args:
+            config_path: Path to the YAML configuration file.
+        
+        Returns:
+            A dictionary containing the validated configuration data.
+        """
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
@@ -98,7 +112,11 @@ class HACommandSubscriber:
             sys.exit(1)
 
     async def connect_rabbitmq(self) -> None:
-        """Establish connection to RabbitMQ with retry logic."""
+        """
+        Asynchronously establishes a connection to RabbitMQ and declares required queues with retry logic.
+        
+        Attempts to connect to RabbitMQ using configuration parameters, opening a channel and setting QoS. Declares all command queues and the results queue as specified in the configuration, creating them with durability, message TTL, and maximum priority settings. Retries the connection on failure until successful or until shutdown is signaled.
+        """
         rabbitmq_config = self.config['rabbitmq']
         connection_url = (
             f"amqp://{rabbitmq_config['username']}:{rabbitmq_config['password']}@"
@@ -163,7 +181,11 @@ class HACommandSubscriber:
 
 
     async def setup_http_session(self) -> None:
-        """Set up HTTP session for Home Assistant API."""
+        """
+        Initializes or recreates the aiohttp ClientSession for communicating with the Home Assistant API.
+        
+        Creates a new session if one does not exist or if the previous session has been closed, using the base URL and authorization token from the configuration.
+        """
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession(
                 base_url=self.config['home_assistant']['url'],
@@ -174,7 +196,15 @@ class HACommandSubscriber:
             )
 
     def validate_command(self, command: Dict) -> bool:
-        """Validate command against schema."""
+        """
+        Validates a command dictionary against the predefined JSON schema.
+        
+        Args:
+            command: The command dictionary to validate.
+        
+        Returns:
+            True if the command is valid according to the schema, False otherwise.
+        """
         try:
             jsonschema.validate(instance=command, schema=COMMAND_SCHEMA)
             return True
@@ -188,7 +218,17 @@ class HACommandSubscriber:
         max_tries=3
     )
     async def execute_command(self, command: Dict) -> CommandResult:
-        """Execute command via Home Assistant API."""
+        """
+        Executes a Home Assistant service command via the HTTP API.
+        
+        Sends a POST request to the Home Assistant API to invoke the specified service with the provided target and service data. Returns a CommandResult indicating success or failure, including the API response or error details.
+        
+        Args:
+            command: Dictionary containing 'domain', 'service', 'target', and optional 'service_data'.
+        
+        Returns:
+            CommandResult with execution outcome, timestamp, and response or error information.
+        """
         # Ensure session is created for each command execution if it's not persistent
         if self.session is None or self.session.closed:
              await self.setup_http_session()
@@ -226,7 +266,11 @@ class HACommandSubscriber:
             )
 
     async def process_command(self, command_data: Dict) -> None:
-        """Process and execute a command with retry logic."""
+        """
+        Processes a command by validating, executing, and retrying it as configured.
+        
+        Validates the command structure, executes it using the Home Assistant API, and applies retry logic based on the command's retry configuration. Publishes the result after success or after all attempts fail.
+        """
         if not self.validate_command(command_data):
             logger.error(f"Invalid command format: {command_data}")
             # Consider sending to a dead-letter queue or logging permanently
@@ -252,7 +296,12 @@ class HACommandSubscriber:
                 await self.publish_result(result) # Publish final failure
 
     async def publish_result(self, result: CommandResult) -> None:
-        """Publish command result to results queue."""
+        """
+        Publishes a command execution result to the configured RabbitMQ results queue.
+        
+        Args:
+            result: The CommandResult object representing the outcome of a command execution.
+        """
         if not self.channel or self.channel.is_closed:
             logger.error("Cannot publish result, channel is not available.")
             return
@@ -273,7 +322,11 @@ class HACommandSubscriber:
 
 
     async def on_message(self, message: aio_pika.IncomingMessage) -> None:
-        """Async callback to process received message."""
+        """
+        Handles an incoming RabbitMQ message by decoding and processing it as a command.
+        
+        Attempts to parse the message body as JSON and process it as a Home Assistant command. Acknowledges the message on success, rejects malformed JSON messages without requeue, and negatively acknowledges other errors without requeue.
+        """
         async with message.process(ignore_processed=True): # Auto ack/nack based on context exit
             try:
                 command = json.loads(message.body.decode())
@@ -292,7 +345,13 @@ class HACommandSubscriber:
                 await message.nack(requeue=False) # Example: Nack without requeue
 
     async def start_consuming(self) -> None:
-        """Start consuming messages from command queues."""
+        """
+        Begins asynchronous consumption of messages from all configured command queues.
+        
+        For each command queue specified in the configuration, registers an asynchronous
+        consumer callback to process incoming messages. Logs errors if a queue cannot be
+        consumed or if no consumers are started.
+        """
         if not self.channel:
             logger.error("Cannot start consuming, channel is not available.")
             return
@@ -313,7 +372,11 @@ class HACommandSubscriber:
 
 
     async def run(self) -> None:
-        """Run the command subscriber service."""
+        """
+        Runs the main service loop for the command subscriber, managing startup, message consumption, and graceful shutdown.
+        
+        Initializes the HTTP session and connects to RabbitMQ, starting message consumers if the channel is established. Keeps the service alive until an exit signal is received. On shutdown or error, cancels consumers and closes all connections and resources.
+        """
         await self.setup_http_session() # Setup HTTP session once
         try:
             await self.connect_rabbitmq()
@@ -348,7 +411,12 @@ class HACommandSubscriber:
                 logger.info("RabbitMQ connection closed.")
 
 def main():
-    """Main entry point."""
+    """
+    Starts the Home Assistant command subscriber service using the provided configuration.
+    
+    Initializes the subscriber, runs its asynchronous event loop, and handles graceful shutdown
+    on keyboard interrupt, ensuring all tasks are cancelled before exiting.
+    """
     config_path = os.environ.get('CONFIG_PATH', 'config.yaml')
     subscriber = HACommandSubscriber(config_path)
     

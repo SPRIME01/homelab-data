@@ -73,19 +73,39 @@ class BatchedRequests:
 
     @property
     def is_full(self) -> bool:
+        """
+        Returns True if the batch has reached its maximum allowed size.
+        """
         return len(self.requests) >= self.max_batch_size
 
     @property
     def is_timed_out(self) -> bool:
+        """
+        Determines whether the batch has exceeded its configured timeout.
+        
+        Returns:
+            True if the batch's age in milliseconds is greater than or equal to its timeout; otherwise, False.
+        """
         elapsed_ms = (time.time() - self.created_time) * 1000
         return elapsed_ms >= self.timeout_ms
 
     @property
     def should_process(self) -> bool:
+        """
+        Determines whether the batch is ready for processing.
+        
+        Returns:
+            True if the batch is full or has timed out and contains at least one request; otherwise, False.
+        """
         return self.is_full or (self.is_timed_out and len(self.requests) > 0)
 
     @property
     def highest_priority(self) -> int:
+        """
+        Returns the highest priority value among all requests in the batch.
+        
+        If the batch contains no requests, returns 0.
+        """
         if not self.requests: return 0
         return max(req.priority for req in self.requests)
 
@@ -94,6 +114,11 @@ from mcp_handler import ModelContextManager # Removed ConversationContext as it'
 
 class InferenceHandler:
     def __init__(self, config_path: str = DEFAULT_CONFIG_PATH):
+        """
+        Initializes the InferenceHandler with configuration, batching, and context management.
+        
+        Loads configuration from the specified path, sets up RabbitMQ connection placeholders, initializes batching structures and locks, configures the Triton client type, and prepares a thread pool executor for inference calls. If Model Context Protocol (MCP) is enabled in the configuration, initializes the context manager for conversational context tracking.
+        """
         self.config = self._load_config(config_path)
         self.connection: Optional[aio_pika.RobustConnection] = None
         self.channel: Optional[aio_pika.Channel] = None
@@ -121,6 +146,17 @@ class InferenceHandler:
 
 
     def _load_config(self, config_path: str) -> Dict:
+        """
+        Loads and validates the YAML configuration file.
+        
+        Reads the configuration from the specified path, ensuring required sections ('rabbitmq', 'triton', 'models') are present. Exits the application if loading or validation fails.
+        
+        Args:
+            config_path: Path to the YAML configuration file.
+        
+        Returns:
+            A dictionary containing the loaded configuration.
+        """
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
@@ -134,10 +170,20 @@ class InferenceHandler:
             sys.exit(1)
 
     async def _signal_handler_async(self, signum: int) -> None:
+        """
+        Handles termination signals by initiating a graceful shutdown.
+        
+        Sets a flag to indicate that the service should exit upon receiving a termination signal.
+        """
         logger.info(f"Received signal {signum}, initiating graceful shutdown")
         self.should_exit = True
 
     async def connect_rabbitmq(self) -> None:
+        """
+        Establishes an asynchronous connection to RabbitMQ and declares exchanges and queues.
+        
+        Attempts to connect to RabbitMQ using configuration parameters, sets up exchanges and queues with specified properties, and applies queue bindings. Retries connection on failure until successful or shutdown is requested.
+        """
         rabbitmq_config = self.config['rabbitmq']
         connection_url = (
             f"amqp://{rabbitmq_config['username']}:{rabbitmq_config['password']}@"
@@ -195,6 +241,20 @@ class InferenceHandler:
     async def get_triton_client(self, model_name: str):
         # This method remains largely the same as Triton client instantiation is not async
         # but the context manager itself is async.
+        """
+        Asynchronously provides a Triton inference client for the specified model as a context manager.
+        
+        Selects the appropriate Triton client type (gRPC or HTTP) and server URL based on model-specific or global configuration. Yields the instantiated client for use within an async context. Ensures proper cleanup of the client if applicable.
+        
+        Args:
+            model_name: The name of the model for which to create the Triton client.
+        
+        Yields:
+            An instance of the appropriate Triton inference client for the specified model.
+        
+        Raises:
+            Exception: If client creation fails or configuration is invalid.
+        """
         client = None # Define client outside try to ensure it's in scope for finally
         try:
             model_conf = next((m for m in self.config['models'] if m['name'] == model_name), None)
@@ -226,6 +286,11 @@ class InferenceHandler:
 
 
     async def add_to_batch(self, request: InferenceRequest) -> None:
+        """
+        Adds an inference request to the appropriate batch for its model and version.
+        
+        If no batch exists for the specified model and version, a new batch is created using model-specific or default batch configuration. This method is thread-safe and ensures requests are grouped for efficient batched inference.
+        """
         model_key = f"{request.model_name}:{request.model_version}"
         async with self.batch_lock:
             if model_key not in self.batched_requests:
@@ -240,6 +305,11 @@ class InferenceHandler:
             logger.debug(f"Added request to batch {model_key}. Size: {len(self.batched_requests[model_key].requests)}")
 
     async def process_batches(self) -> None:
+        """
+        Continuously monitors and processes inference batches that are ready for execution.
+        
+        Collects batches that are either full or have timed out, removes them from the batch queue, and schedules their processing asynchronously. This loop runs until a shutdown signal is received.
+        """
         while not self.should_exit:
             batches_to_process_list: List[BatchedRequests] = []
             async with self.batch_lock:
@@ -254,6 +324,11 @@ class InferenceHandler:
             await asyncio.sleep(0.01) # Yield control
 
     async def process_single_batch(self, batch: BatchedRequests) -> None: # Renamed from process_batch
+        """
+        Processes a batch of inference requests for a specific model and publishes results.
+        
+        Aggregates input tensors from all requests in the batch, optionally augments inputs with conversational context if enabled, and performs inference using the appropriate Triton client (gRPC or HTTP). Publishes inference results for each request via RabbitMQ. On error, sends failure responses for all requests in the batch.
+        """
         if not batch.requests: return
         # ... (rest of the _infer_grpc, _infer_http, _process_inference_results, _convert_numpy_to_json logic remains largely the same)
         # ... but they will be called by this method.
@@ -305,6 +380,23 @@ class InferenceHandler:
 
     async def _infer_grpc(self, client: triton_grpc.InferenceServerClient, model_name, model_version, input_tensors, requests):
         # ... (existing _infer_grpc logic, ensure it uses self.executor for client.infer)
+        """
+        Performs batched inference on a Triton Inference Server using the gRPC client.
+        
+        Prepares input tensors and requested outputs from the batch, then asynchronously
+        invokes the Triton gRPC client's `infer` method in a thread pool executor. Handles
+        both byte/string and numeric input types.
+        
+        Args:
+            client: The Triton gRPC InferenceServerClient instance.
+            model_name: Name of the model to use for inference.
+            model_version: Version of the model to use, or None for default.
+            input_tensors: Dictionary mapping input names to lists of input values.
+            requests: List of InferenceRequest objects in the batch.
+        
+        Returns:
+            The inference result returned by the Triton gRPC client.
+        """
         triton_inputs = []
         for input_name, input_values in input_tensors.items():
             sample = input_values[0]
@@ -329,6 +421,21 @@ class InferenceHandler:
 
     async def _infer_http(self, client: triton_http.InferenceServerClient, model_name, model_version, input_tensors, requests):
         # ... (existing _infer_http logic, ensure it uses self.executor for client.infer)
+        """
+        Performs an asynchronous inference request to a Triton Inference Server using the HTTP client.
+        
+        Aggregates input tensors and requested outputs from a batch of inference requests, prepares them for Triton HTTP inference, and executes the inference call in a thread pool executor to avoid blocking the event loop.
+        
+        Args:
+            client: The Triton HTTP InferenceServerClient instance.
+            model_name: Name of the model to use for inference.
+            model_version: Specific version of the model, or None for default.
+            input_tensors: Dictionary mapping input names to lists of input values for the batch.
+            requests: List of InferenceRequest objects representing the batched requests.
+        
+        Returns:
+            The inference result returned by the Triton HTTP client.
+        """
         triton_inputs = []
         for input_name, input_values in input_tensors.items():
             sample = input_values[0]
@@ -356,6 +463,11 @@ class InferenceHandler:
         # ... (and _publish_response is called)
         # Note: inference_result type depends on client (grpc.InferResult or http.InferResult)
         # as_numpy is available on both.
+        """
+        Processes inference results for a batch of requests and publishes responses.
+        
+        Extracts output tensors from the inference result, converts them to JSON-serializable formats, and sends a response for each request in the batch. If model context protocol (MCP) is enabled, updates the conversation context with the original input and primary model output.
+        """
         output_data: Dict[str, Optional[np.ndarray]] = {}
         all_output_names = set().union(*(req.outputs for req in batch.requests))
 
@@ -408,6 +520,11 @@ class InferenceHandler:
 
     def _convert_numpy_to_json(self, data: Any) -> Any:
         # ... (existing logic)
+        """
+        Converts numpy arrays and scalar types to JSON-serializable Python objects.
+        
+        Supports conversion of numpy arrays (including byte and unicode types), numpy scalars, and bytes to formats compatible with JSON serialization. Non-numpy types are returned unchanged.
+        """
         if isinstance(data, np.ndarray):
             if data.dtype.kind == 'S': return data.tobytes().decode('utf-8', errors='replace')
             if data.dtype.kind == 'U': return str(data)
@@ -417,6 +534,11 @@ class InferenceHandler:
         return data
 
     async def _publish_response(self, request: InferenceRequest, response_data: Dict) -> None:
+        """
+        Publishes an inference response message to the appropriate RabbitMQ exchange and routing key.
+        
+        If the request specifies a `reply_to` property, the response is sent to the default exchange using that routing key; otherwise, the configured response exchange and routing key are used. The response is serialized as JSON and published with persistent delivery mode.
+        """
         if not self.channel or self.channel.is_closed:
             logger.error("Cannot publish response, RabbitMQ channel is not available.")
             # Optionally, try to reconnect or queue internally, but for now, log and drop.
@@ -443,6 +565,11 @@ class InferenceHandler:
             logger.error(f"Failed to publish response for {request.request_id}: {e}", exc_info=True)
 
     async def _handle_batch_failure(self, batch: BatchedRequests, error_message: str):
+        """
+        Handles a failed batch by logging the error and sending an error response for each request in the batch.
+        
+        Each response includes the request ID, model information, error message, timestamp, and processing time.
+        """
         logger.error(f"Batch failure for model {batch.model_name}: {error_message}")
         for request in batch.requests:
             error_response = {
@@ -455,6 +582,11 @@ class InferenceHandler:
 
     def _parse_message(self, body: bytes, properties: aio_pika.spec.BasicProperties, routing_key: Optional[str]) -> InferenceRequest:
         # ... (adapt to use aio_pika properties if different, but structure is similar)
+        """
+        Parses a RabbitMQ message body and properties into an InferenceRequest object.
+        
+        Validates the presence of required fields and extracts optional context information if enabled. Raises an exception if the message is invalid.
+        """
         try:
             message_dict = json.loads(body.decode('utf-8'))
             if 'model_name' not in message_dict or 'inputs' not in message_dict or not message_dict['inputs']:
@@ -484,7 +616,11 @@ class InferenceHandler:
             raise # Re-raise to be caught by on_message handler
 
     async def on_message(self, message: aio_pika.IncomingMessage) -> None:
-        """Async callback for processing messages."""
+        """
+        Asynchronously processes an incoming RabbitMQ message for inference requests.
+        
+        Parses the message, validates its contents, and adds the resulting inference request to the appropriate batch. Acknowledges valid messages, rejects messages with validation errors, and negatively acknowledges messages with other errors without requeuing.
+        """
         async with message.process(ignore_processed=True): # auto ack/nack context
             try:
                 request = self._parse_message(message.body, message.properties, message.routing_key)
@@ -498,6 +634,11 @@ class InferenceHandler:
                 await message.nack(requeue=False) # Nack without requeue, or configure requeue policy
 
     async def start_consumers(self) -> None: # Renamed from start_consumer
+        """
+        Starts asynchronous consumers for all configured RabbitMQ queues.
+        
+        Initializes message consumption on each queue specified in the configuration, storing consumer tags for later management. Logs errors if any queue fails to start consuming and warns if no consumers are started.
+        """
         if not self.channel:
             logger.error("Cannot start consumers, channel is not available.")
             return
@@ -519,6 +660,11 @@ class InferenceHandler:
 
     async def run(self):
         # Setup signal handlers for async context
+        """
+        Runs the main asynchronous event loop for the inference handler service.
+        
+        Initializes signal handlers for graceful shutdown, establishes and monitors the RabbitMQ connection, starts batch processing and message consumers, and manages reconnection logic. On shutdown, cancels batch processing, stops consumers, closes connections, and cleans up resources.
+        """
         for sig in (signal.SIGINT, signal.SIGTERM):
             self.loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._signal_handler_async(s)))
 
@@ -565,6 +711,11 @@ class InferenceHandler:
 
 
 async def main_async(): # Renamed for clarity
+    """
+    Asynchronously starts the inference handler service using the configuration file path from the environment or default.
+    
+    Initializes the InferenceHandler and runs its main event loop until shutdown.
+    """
     config_path = os.environ.get("CONFIG_PATH", DEFAULT_CONFIG_PATH)
     handler = InferenceHandler(config_path=config_path) # Pass loop if needed by constructor
     await handler.run()
