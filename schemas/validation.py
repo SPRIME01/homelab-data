@@ -5,6 +5,7 @@ import json
 import glob
 import logging
 import jsonschema
+import copy # Added import
 from typing import Dict, Any, Optional, List, Tuple, Union
 from datetime import datetime
 from functools import lru_cache
@@ -425,7 +426,7 @@ class SchemaEnforcer:
         Returns:
             Fixed message
         """
-        fixed_message = message.copy()
+        fixed_message = copy.deepcopy(message) # Changed to deepcopy
         schema = self.registry.get_schema(schema_id, version)
 
         for err in error.errors:

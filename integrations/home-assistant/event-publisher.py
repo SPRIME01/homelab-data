@@ -8,10 +8,10 @@ import signal
 import asyncio
 import logging
 import aiohttp
-import pika
+import aio_pika # Changed from pika
 import yaml
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
+from typing import Dict, List, Optional, Any, Tuple # Added Tuple
+from dataclasses import dataclass, asdict # Added asdict
 from datetime import datetime
 from aiohttp import web
 from collections import defaultdict
@@ -32,21 +32,24 @@ class EventBatch:
     """Represents a batch of events for a specific exchange/routing key."""
     events: List[Dict]
     last_update: float
-    exchange: str
+    exchange_name: str # Renamed for clarity
     routing_key: str
 
 class HAEventPublisher:
     def __init__(self, config_path: str = "config.yaml"):
         self.config = self.load_config(config_path)
-        self.connection = None
-        self.channel = None
+        self.connection: Optional[aio_pika.RobustConnection] = None # Typed
+        self.channel: Optional[aio_pika.Channel] = None # Typed
         self.should_exit = False
-        self.event_batches = defaultdict(lambda: EventBatch([], time.time(), "", ""))
+        self.event_batches = defaultdict(lambda: EventBatch([], time.time(), "", "")) # Will store exchange_name now
         self.batch_lock = asyncio.Lock()
+        self._connection_retry_lock = asyncio.Lock() # To prevent multiple concurrent reconnections
 
         # Setup signal handlers
-        signal.signal(signal.SIGINT, self.signal_handler)
-        signal.signal(signal.SIGTERM, self.signal_handler)
+        # loop = asyncio.get_event_loop() # Not needed here, signal handlers added in main context
+        # for sig in (signal.SIGINT, signal.SIGTERM):
+        #     loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self.signal_handler_async(s)))
+
 
     def load_config(self, config_path: str) -> Dict:
         """Load configuration from YAML file."""
@@ -54,217 +57,299 @@ class HAEventPublisher:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
 
-            # Validate required configuration
             required_keys = ['rabbitmq', 'home_assistant', 'webhook']
             for key in required_keys:
                 if key not in config:
                     raise ValueError(f"Missing required configuration section: {key}")
-
+            if 'exchanges' not in config['rabbitmq'] or 'routing' not in config['rabbitmq']:
+                 raise ValueError("Missing 'rabbitmq.exchanges' or 'rabbitmq.routing' configuration.")
             return config
         except Exception as e:
             logger.error(f"Failed to load configuration: {e}")
             sys.exit(1)
 
-    def signal_handler(self, signum: int, frame: Any) -> None:
+    async def signal_handler_async(self, signum: int) -> None: # Made async
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, initiating shutdown...")
         self.should_exit = True
 
-    async def connect_rabbitmq(self) -> None:
+    async def connect_rabbitmq(self) -> bool: # Return bool for success
         """Establish connection to RabbitMQ with retry logic."""
-        while not self.should_exit:
-            try:
-                # Connection parameters
-                params = pika.ConnectionParameters(
-                    host=self.config['rabbitmq']['host'],
-                    port=self.config['rabbitmq']['port'],
-                    credentials=pika.PlainCredentials(
-                        username=self.config['rabbitmq']['username'],
-                        password=self.config['rabbitmq']['password']
-                    ),
-                    heartbeat=60,
-                    connection_attempts=3
-                )
+        # Prevent multiple concurrent connection attempts
+        if self._connection_retry_lock.locked():
+            logger.debug("Connection attempt already in progress.")
+            return False
 
-                self.connection = pika.BlockingConnection(params)
-                self.channel = self.connection.channel()
+        async with self._connection_retry_lock:
+            if self.connection and not self.connection.is_closed:
+                logger.info("Connection already established.")
+                return True
 
-                # Declare exchanges
-                for exchange in self.config['rabbitmq']['exchanges']:
-                    self.channel.exchange_declare(
-                        exchange=exchange['name'],
-                        exchange_type=exchange['type'],
-                        durable=True
-                    )
-
-                logger.info("Successfully connected to RabbitMQ")
-                return
-            except Exception as e:
-                logger.error(f"Failed to connect to RabbitMQ: {e}")
-                await asyncio.sleep(5)
-
-    async def publish_event(self, event: Dict, exchange: str, routing_key: str) -> None:
-        """Publish event to RabbitMQ."""
-        try:
-            if not self.connection or self.connection.is_closed:
-                await self.connect_rabbitmq()
-
-            self.channel.basic_publish(
-                exchange=exchange,
-                routing_key=routing_key,
-                body=json.dumps(event),
-                properties=pika.BasicProperties(
-                    delivery_mode=2,  # Make message persistent
-                    timestamp=int(time.time()),
-                    content_type='application/json'
-                )
+            rabbitmq_config = self.config['rabbitmq']
+            connection_url = (
+                f"amqp://{rabbitmq_config['username']}:{rabbitmq_config['password']}@"
+                f"{rabbitmq_config['host']}:{rabbitmq_config['port']}/"
             )
-        except Exception as e:
-            logger.error(f"Failed to publish event: {e}")
-            # Close connection to force reconnect
-            if self.connection:
+            
+            attempt = 0
+            max_attempts = self.config['rabbitmq'].get('connection_attempts', 3) # Use from config or default
+            retry_delay = 5 # seconds
+
+            while not self.should_exit and attempt < max_attempts :
+                attempt +=1
                 try:
-                    self.connection.close()
-                except:
-                    pass
-            self.connection = None
-            self.channel = None
+                    logger.info(f"Attempting to connect to RabbitMQ (attempt {attempt}/{max_attempts})...")
+                    self.connection = await aio_pika.connect_robust(
+                        connection_url,
+                        loop=asyncio.get_running_loop(),
+                        heartbeat=rabbitmq_config.get('heartbeat', 60)
+                    )
+                    self.channel = await self.connection.channel()
+                    # Optional: await self.channel.set_qos(prefetch_count=10) # If needed
+
+                    # Declare exchanges
+                    for exchange_config in self.config['rabbitmq']['exchanges']:
+                        await self.channel.declare_exchange(
+                            name=exchange_config['name'],
+                            type=aio_pika.ExchangeType(exchange_config['type']), # Use Enum
+                            durable=exchange_config.get('durable', True)
+                        )
+                        logger.info(f"Declared exchange: {exchange_config['name']}")
+
+                    logger.info("Successfully connected to RabbitMQ and channel opened.")
+                    return True # Connection successful
+                except (aio_pika.exceptions.AMQPConnectionError, ConnectionRefusedError) as e:
+                    logger.error(f"Failed to connect to RabbitMQ (attempt {attempt}/{max_attempts}): {e}")
+                    if attempt < max_attempts:
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        logger.error("Max connection attempts reached.")
+                        return False # Max attempts reached
+                except Exception as e: # Catch other potential errors
+                    logger.error(f"An unexpected error occurred during RabbitMQ connection (attempt {attempt}/{max_attempts}): {e}")
+                    if attempt < max_attempts:
+                         await asyncio.sleep(retry_delay)
+                    else:
+                        logger.error("Max connection attempts reached after unexpected error.")
+                        return False
+            return False # Loop exited due to should_exit or max_attempts
+
+    async def publish_event(self, event_data: Dict, exchange_name: str, routing_key: str) -> None:
+        """Publish event to RabbitMQ."""
+        if self.should_exit:
+            logger.warning("Shutdown in progress, not publishing event.")
+            return
+
+        if not self.connection or self.connection.is_closed or not self.channel or self.channel.is_closed:
+            logger.warning("RabbitMQ connection lost. Attempting to reconnect before publishing.")
+            if not await self.connect_rabbitmq(): # Try to reconnect
+                logger.error("Failed to reconnect to RabbitMQ. Cannot publish event.")
+                return # Exit if reconnection failed
+
+        # This check is crucial after potential reconnection
+        if not self.channel or self.channel.is_closed:
+            logger.error("Channel is not available even after attempting reconnection. Cannot publish.")
+            return
+
+        try:
+            exchange = await self.channel.get_exchange(exchange_name) # Get exchange object
+            
+            message_body = json.dumps(event_data).encode('utf-8')
+            message = aio_pika.Message(
+                body=message_body,
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                timestamp=datetime.utcnow(), # Use datetime object
+                content_type='application/json'
+            )
+            
+            await exchange.publish(message, routing_key=routing_key)
+            logger.debug(f"Published event to exchange '{exchange_name}' with key '{routing_key}'")
+
+        except aio_pika.exceptions.ChannelClosed as e:
+            logger.error(f"Channel closed while publishing event: {e}. Attempting reconnect.")
+            self.channel = None # Mark channel as unusable
+            if await self.connect_rabbitmq(): # Try to reconnect
+                 await self.publish_event(event_data, exchange_name, routing_key) # Retry publishing
+            else:
+                logger.error("Failed to republish event after reconnection.")
+        except Exception as e:
+            logger.error(f"Failed to publish event to exchange '{exchange_name}': {e}")
+            # Consider more specific error handling or re-raising if critical
 
     def get_routing_info(self, event: Dict) -> Tuple[str, str]:
         """Determine exchange and routing key based on event type."""
         event_type = event.get('event_type', '')
         domain = event_type.split('.')[0] if '.' in event_type else 'default'
 
-        # Match event type to routing configuration
-        for route in self.config['rabbitmq']['routing']:
-            if (route['domain'] == domain or route['domain'] == '*') and \
-               (route['event_type'] == event_type or route['event_type'] == '*'):
-                return route['exchange'], route['routing_key'].format(
+        for route_config in self.config['rabbitmq']['routing']:
+            if (route_config['domain'] == domain or route_config['domain'] == '*') and \
+               (route_config['event_type'] == event_type or route_config['event_type'] == '*'):
+                return route_config['exchange'], route_config['routing_key'].format(
                     domain=domain,
                     event_type=event_type
                 )
-
-        # Default routing if no match found
+        
+        default_exchange = self.config['rabbitmq'].get('default_exchange', 'default.events')
+        default_routing_key_pattern = self.config['rabbitmq'].get('default_routing_key_pattern', 'events.{domain}.{event_type}')
+        
         return (
-            self.config['rabbitmq']['default_exchange'],
-            f"home.events.{domain}.{event_type}"
+            default_exchange,
+            default_routing_key_pattern.format(domain=domain, event_type=event_type)
         )
 
     async def add_to_batch(self, event: Dict) -> None:
         """Add event to appropriate batch."""
-        exchange, routing_key = self.get_routing_info(event)
-        batch_key = f"{exchange}:{routing_key}"
+        exchange_name, routing_key = self.get_routing_info(event)
+        batch_key = f"{exchange_name}:{routing_key}"
 
         async with self.batch_lock:
+            # Ensure EventBatch gets exchange_name
             if batch_key not in self.event_batches:
-                self.event_batches[batch_key] = EventBatch([], time.time(), exchange, routing_key)
-
+                self.event_batches[batch_key] = EventBatch([], time.time(), exchange_name, routing_key)
+            
             batch = self.event_batches[batch_key]
             batch.events.append(event)
             batch.last_update = time.time()
 
     async def process_batches(self) -> None:
         """Process event batches periodically."""
+        batch_processing_interval = self.config['rabbitmq'].get('batch_process_interval', 1) # seconds
         while not self.should_exit:
             try:
                 current_time = time.time()
-                batch_size = self.config['rabbitmq'].get('batch_size', 100)
-                batch_timeout = self.config['rabbitmq'].get('batch_timeout', 5)
+                batch_size_config = self.config['rabbitmq'].get('batch_size', 100)
+                batch_timeout_config = self.config['rabbitmq'].get('batch_timeout', 5) # seconds
 
+                processed_keys = []
                 async with self.batch_lock:
-                    for batch_key, batch in list(self.event_batches.items()):
-                        # Process batch if it's full or timed out
-                        if len(batch.events) >= batch_size or \
-                           (len(batch.events) > 0 and current_time - batch.last_update >= batch_timeout):
+                    for batch_key, batch in list(self.event_batches.items()): # Iterate over a copy
+                        if len(batch.events) >= batch_size_config or \
+                           (len(batch.events) > 0 and current_time - batch.last_update >= batch_timeout_config):
+                            
+                            events_to_publish = list(batch.events) # Copy events to publish
+                            batch.events.clear() # Clear original batch events under lock
+                            batch.last_update = current_time # Update last_update to prevent immediate re-processing
+                            processed_keys.append(batch_key) # Mark for potential deletion if empty later
 
-                            if len(batch.events) > 1:
-                                # Publish as batch
+                            # Actual publishing happens outside the lock to avoid holding it during I/O
+                            if len(events_to_publish) > 1:
                                 await self.publish_event({
                                     'type': 'batch',
                                     'timestamp': datetime.utcnow().isoformat(),
-                                    'events': batch.events
-                                }, batch.exchange, batch.routing_key)
-                            elif len(batch.events) == 1:
-                                # Publish single event
+                                    'events': events_to_publish
+                                }, batch.exchange_name, batch.routing_key)
+                                logger.info(f"Published batch of {len(events_to_publish)} events for {batch_key}")
+                            elif len(events_to_publish) == 1:
                                 await self.publish_event(
-                                    batch.events[0],
-                                    batch.exchange,
+                                    events_to_publish[0],
+                                    batch.exchange_name,
                                     batch.routing_key
                                 )
-
-                            # Clear processed events
-                            del self.event_batches[batch_key]
-
+                                logger.info(f"Published single event for {batch_key}")
+                
+                # Clean up empty batches under lock
+                async with self.batch_lock:
+                    for key in processed_keys:
+                        if key in self.event_batches and not self.event_batches[key].events:
+                            del self.event_batches[key]
+                            logger.debug(f"Cleaned up empty batch for key {key}")
+                                
             except Exception as e:
-                logger.error(f"Error processing batches: {e}")
+                logger.error(f"Error processing batches: {e}", exc_info=True)
+            
+            await asyncio.sleep(batch_processing_interval)
 
-            await asyncio.sleep(1)
 
     async def handle_webhook(self, request: web.Request) -> web.Response:
         """Handle incoming webhooks from Home Assistant."""
         try:
             event = await request.json()
-
-            # Validate event format
             if not isinstance(event, dict) or 'event_type' not in event:
+                logger.warning(f"Invalid event format received: {event}")
                 raise ValueError("Invalid event format")
 
-            # Add metadata
             event['received_at'] = datetime.utcnow().isoformat()
-            event['source'] = 'home_assistant'
-
-            # Add to batch for processing
+            event['source'] = 'home_assistant_webhook' # More specific source
             await self.add_to_batch(event)
-
-            return web.Response(status=202)
+            return web.Response(status=202, text="Accepted")
+        except ValueError as ve: # Catch specific validation error
+            logger.error(f"Validation error handling webhook: {ve}")
+            return web.Response(status=400, text=str(ve))
         except Exception as e:
-            logger.error(f"Error handling webhook: {e}")
-            return web.Response(status=400, text=str(e))
+            logger.error(f"Error handling webhook: {e}", exc_info=True)
+            return web.Response(status=500, text="Internal Server Error")
 
-    async def start(self) -> None:
-        """Start the event publisher service."""
-        # Initialize RabbitMQ connection
-        await self.connect_rabbitmq()
+    async def start_server(self) -> None:
+        """Start the event publisher service components."""
+        if not await self.connect_rabbitmq():
+            logger.error("Failed to connect to RabbitMQ during startup. Exiting.")
+            self.should_exit = True
+            return
 
-        # Start batch processing
-        batch_processor = asyncio.create_task(self.process_batches())
+        self.batch_processor_task = asyncio.create_task(self.process_batches())
 
-        # Setup webhook server
         app = web.Application()
         app.router.add_post(self.config['webhook']['path'], self.handle_webhook)
-
-        # Start webhook server
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(
-            runner,
+        
+        self.runner = web.AppRunner(app)
+        await self.runner.setup()
+        self.site = web.TCPSite(
+            self.runner,
             self.config['webhook']['host'],
             self.config['webhook']['port']
         )
-        await site.start()
+        await self.site.start()
+        logger.info(f"Webhook server started on http://{self.config['webhook']['host']}:{self.config['webhook']['port']}{self.config['webhook']['path']}")
 
-        logger.info(f"Webhook server started on {self.config['webhook']['host']}:{self.config['webhook']['port']}")
+        while not self.should_exit:
+            await asyncio.sleep(1)
 
-        try:
-            while not self.should_exit:
-                await asyncio.sleep(1)
-        finally:
-            # Cleanup
-            batch_processor.cancel()
-            await runner.cleanup()
-            if self.connection:
-                self.connection.close()
+    async def stop_server(self) -> None:
+        logger.info("Stopping event publisher service...")
+        if hasattr(self, 'batch_processor_task') and self.batch_processor_task:
+            self.batch_processor_task.cancel()
+            try:
+                await self.batch_processor_task
+            except asyncio.CancelledError:
+                logger.info("Batch processor task cancelled.")
+        
+        if hasattr(self, 'site') and self.site:
+            await self.site.stop()
+            logger.info("Webhook site stopped.")
+        if hasattr(self, 'runner') and self.runner:
+            await self.runner.cleanup()
+            logger.info("Webhook runner cleaned up.")
+        
+        if self.connection and not self.connection.is_closed:
+            await self.connection.close()
+            logger.info("RabbitMQ connection closed.")
+        logger.info("Event publisher service stopped.")
 
-def main():
-    """Main entry point."""
-    # Load config path from environment or use default
+
+async def main_async(): # Renamed to avoid conflict
+    """Main async entry point."""
     config_path = os.environ.get('CONFIG_PATH', 'config.yaml')
-
-    # Create publisher instance
     publisher = HAEventPublisher(config_path)
 
-    # Run the service
-    asyncio.run(publisher.start())
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(publisher.signal_handler_async(s)))
+    
+    try:
+        await publisher.start_server()
+    except Exception as e:
+        logger.error(f"Unhandled error in publisher: {e}", exc_info=True)
+    finally:
+        if not publisher.should_exit: # Ensure stop is called if not initiated by signal
+            publisher.should_exit = True 
+        await publisher.stop_server()
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        logger.info("Application interrupted by user.")
+    except Exception as e:
+        logger.critical(f"Application terminated with unhandled exception: {e}", exc_info=True)
+    finally:
+        logger.info("Application shutdown finalized.")

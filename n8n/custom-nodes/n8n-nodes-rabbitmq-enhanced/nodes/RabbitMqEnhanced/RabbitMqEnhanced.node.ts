@@ -766,6 +766,32 @@ export class RabbitMqEnhanced implements INodeType {
         default: '{\n  "type": "object",\n  "properties": {\n    "name": { "type": "string" }\n  }\n}',
         description: 'JSON schema to validate against',
       },
+      {
+        displayName: 'Encryption Key',
+        name: 'encryptionKey',
+        type: 'string',
+        typeOptions: {
+          password: true,
+        },
+        displayOptions: {
+          show: {
+            operation: [
+              'publish',
+              'publishToQueue',
+              'batchPublish',
+            ],
+            applyTransformation: [
+              true,
+            ],
+            transformationType: [
+              'encrypt',
+            ],
+          },
+        },
+        default: '',
+        required: true,
+        description: 'The secret key for message encryption. Must be strong and kept secure.',
+      },
     ],
   };
 
@@ -814,7 +840,16 @@ export class RabbitMqEnhanced implements INodeType {
                   options.contentEncoding = 'gzip';
                   break;
                 case 'encrypt':
-                  messageContent = await transformer.encrypt(messageContent, 'n8n-secret-key');
+                  const encryptionKeyPublish = this.getNodeParameter('encryptionKey', i) as string;
+                  if (!encryptionKeyPublish) {
+                    throw new NodeOperationError(this.getNode(), 'Encryption key is required for "encrypt" transformation.', { itemIndex: i });
+                  }
+                  messageContent = await transformer.encrypt(messageContent, encryptionKeyPublish);
+                  const encryptionKeyPublishToQueue = this.getNodeParameter('encryptionKey', i) as string;
+                  if (!encryptionKeyPublishToQueue) {
+                    throw new NodeOperationError(this.getNode(), 'Encryption key is required for "encrypt" transformation.', { itemIndex: i });
+                  }
+                  messageContent = await transformer.encrypt(messageContent, encryptionKeyPublishToQueue);
                   options.contentEncoding = 'encrypted';
                   break;
                 case 'function':
@@ -867,7 +902,11 @@ export class RabbitMqEnhanced implements INodeType {
                   options.contentEncoding = 'gzip';
                   break;
                 case 'encrypt':
-                  messageContent = await transformer.encrypt(messageContent, 'n8n-secret-key');
+                  const encryptionKeyPublishToQueue = this.getNodeParameter('encryptionKey', i) as string;
+                  if (!encryptionKeyPublishToQueue) {
+                    throw new NodeOperationError(this.getNode(), 'Encryption key is required for "encrypt" transformation for "publishToQueue" operation.', { itemIndex: i });
+                  }
+                  messageContent = await transformer.encrypt(messageContent, encryptionKeyPublishToQueue);
                   options.contentEncoding = 'encrypted';
                   break;
                 case 'function':
@@ -930,7 +969,11 @@ export class RabbitMqEnhanced implements INodeType {
                     messageOptions.contentEncoding = 'gzip';
                     break;
                   case 'encrypt':
-                    content = await transformer.encrypt(content, 'n8n-secret-key');
+                    const encryptionKeyBatch = this.getNodeParameter('encryptionKey', i) as string;
+                    if (!encryptionKeyBatch) {
+                      throw new NodeOperationError(this.getNode(), 'Encryption key is required for "encrypt" transformation.', { itemIndex: i });
+                    }
+                    content = await transformer.encrypt(content, encryptionKeyBatch);
                     messageOptions.contentEncoding = 'encrypted';
                     break;
                   case 'function':

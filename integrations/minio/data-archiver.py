@@ -14,12 +14,13 @@ import logging
 import asyncio
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
-import aiohttp
+import io # Added for BytesIO
+# import aiohttp # aiohttp is not used directly here, can be removed if not needed elsewhere
 import aio_pika
 import zstandard
 from minio import Minio
-from minio.commonconfig import ENABLED, Filter
-from minio.lifecycleconfig import LifecycleConfig, Rule, Expiration, Transition
+from minio.commonconfig import ENABLED, Filter # type: ignore
+from minio.lifecycleconfig import LifecycleConfig, Rule, Expiration, Transition # type: ignore
 from prometheus_client import start_http_server, Counter, Gauge, Summary
 
 # Configure logging
@@ -81,11 +82,13 @@ class DataArchiver:
     def __init__(self, config_path: str):
         """Initialize the archiver with configuration."""
         self.config = self._load_config(config_path)
-        self.connection = None
-        self.channel = None
-        self.minio_client = None
+        self.connection: Optional[aio_pika.RobustConnection] = None
+        self.channel: Optional[aio_pika.Channel] = None
+        self.minio_client: Optional[Minio] = None
         self.should_exit = False
         self.batches: Dict[str, MessageBatch] = {}
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+
 
     def _load_config(self, config_path: str) -> Dict:
         """Load configuration from YAML file."""
@@ -93,7 +96,6 @@ class DataArchiver:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
 
-            # Validate required configuration
             required_sections = ['rabbitmq', 'minio', 'archival']
             missing = [s for s in required_sections if s not in config]
             if missing:
@@ -107,14 +109,17 @@ class DataArchiver:
 
     async def setup(self):
         """Set up connections and initialize storage."""
+        self.loop = asyncio.get_running_loop()
         # Connect to RabbitMQ
         try:
+            rabbitmq_config = self.config['rabbitmq']
             self.connection = await aio_pika.connect_robust(
-                host=self.config['rabbitmq']['host'],
-                port=self.config['rabbitmq']['port'],
-                login=self.config['rabbitmq']['username'],
-                password=self.config['rabbitmq']['password'],
-                virtualhost=self.config['rabbitmq'].get('vhost', '/')
+                host=rabbitmq_config['host'],
+                port=rabbitmq_config['port'],
+                login=rabbitmq_config['username'],
+                password=rabbitmq_config['password'],
+                virtualhost=rabbitmq_config.get('vhost', '/'),
+                loop=self.loop
             )
             self.channel = await self.connection.channel()
             logger.info("Connected to RabbitMQ")
@@ -125,16 +130,16 @@ class DataArchiver:
 
         # Initialize MinIO client
         try:
+            minio_config = self.config['minio']
             self.minio_client = Minio(
-                self.config['minio']['endpoint'],
-                access_key=self.config['minio']['access_key'],
-                secret_key=self.config['minio']['secret_key'],
-                secure=self.config['minio'].get('secure', True)
+                minio_config['endpoint'],
+                access_key=minio_config['access_key'],
+                secret_key=minio_config['secret_key'],
+                secure=minio_config.get('secure', True)
             )
 
-            # Ensure buckets exist with proper configuration
             await self._setup_buckets()
-            logger.info("Connected to MinIO")
+            logger.info("Connected to MinIO and buckets configured")
 
         except Exception as e:
             logger.error(f"Failed to connect to MinIO: {e}")
@@ -142,226 +147,212 @@ class DataArchiver:
 
     async def _setup_buckets(self):
         """Set up MinIO buckets with lifecycle policies."""
+        if not self.minio_client:
+            raise ConnectionError("MinIO client not initialized")
+
         for archive_config in self.config['archival']['archives']:
             bucket = archive_config['bucket']
-
-            # Create bucket if it doesn't exist
-            if not self.minio_client.bucket_exists(bucket):
-                self.minio_client.make_bucket(bucket)
+            
+            bucket_exists = await self.loop.run_in_executor(None, self.minio_client.bucket_exists, bucket)
+            if not bucket_exists:
+                await self.loop.run_in_executor(None, self.minio_client.make_bucket, bucket)
                 logger.info(f"Created bucket: {bucket}")
 
-            # Configure lifecycle rules
             lifecycle_rules = []
-
             if 'retention' in archive_config:
-                # Add expiration rule
                 lifecycle_rules.append(
                     Rule(
-                        ENABLED,
+                        status=ENABLED, # Corrected: status=ENABLED instead of ENABLED directly
                         rule_filter=Filter(prefix=archive_config.get('prefix', '')),
                         rule_id="expiration",
-                        expiration=Expiration(
-                            days=archive_config['retention'].get('days', 365)
-                        )
+                        expiration=Expiration(days=archive_config['retention'].get('days', 365))
                     )
                 )
 
             if 'tiering' in archive_config:
-                # Add transition rules for tiering
                 for tier in archive_config['tiering']:
                     lifecycle_rules.append(
                         Rule(
-                            ENABLED,
+                            status=ENABLED, # Corrected
                             rule_filter=Filter(prefix=archive_config.get('prefix', '')),
                             rule_id=f"transition_{tier['name']}",
-                            transition=Transition(
-                                days=tier['days'],
-                                storage_class=tier['storage_class']
-                            )
+                            transition=Transition(days=tier['days'], storage_class=tier['storage_class'])
                         )
                     )
-
+            
             if lifecycle_rules:
-                config = LifecycleConfig(lifecycle_rules)
-                self.minio_client.set_bucket_lifecycle(bucket, config)
+                config = LifecycleConfig(rules=lifecycle_rules) # Corrected: rules=lifecycle_rules
+                await self.loop.run_in_executor(None, self.minio_client.set_bucket_lifecycle, bucket, config)
                 logger.info(f"Set lifecycle rules for bucket: {bucket}")
 
-    def _get_object_path(self, queue_name: str, timestamp: datetime) -> str:
-        """Generate object path based on partitioning strategy."""
-        # Use hierarchical partitioning: year/month/day/hour
-        return f"{queue_name}/{timestamp.year}/{timestamp.month:02d}/{timestamp.day:02d}/{timestamp.hour:02d}/" + \
-               f"messages_{timestamp.timestamp():.0f}.json.zst"
+
+    def _get_object_path(self, queue_name: str) -> str: # Removed timestamp argument
+        """Generate object path based on partitioning strategy using current UTC time."""
+        # Use UTC for partitioning to avoid timezone issues
+        timestamp_utc = datetime.utcnow() # Use current UTC time
+        return f"{queue_name}/{timestamp_utc.year}/{timestamp_utc.month:02d}/{timestamp_utc.day:02d}/{timestamp_utc.hour:02d}/" + \
+               f"messages_{int(timestamp_utc.timestamp())}.json.zst" # Use int for timestamp
 
     async def _archive_batch(self, queue_name: str, batch: MessageBatch):
         """Archive a batch of messages to MinIO."""
-        if not batch.messages:
+        if not batch.messages or not self.minio_client or not self.loop:
             return
 
         try:
             archive_config = next(
                 (a for a in self.config['archival']['archives']
-                 if queue_name in a['queues']),
-                None
+                 if queue_name in a['queues']), None
             )
-
             if not archive_config:
                 logger.warning(f"No archive configuration for queue: {queue_name}")
                 return
 
-            # Prepare metadata
-            timestamp = datetime.now()
+            timestamp = datetime.utcnow() # Changed to utcnow for consistency
             metadata = {
                 "queue": queue_name,
-                "message_count": len(batch.messages),
-                "first_message_time": batch.first_timestamp,
+                "message_count": str(len(batch.messages)), # Metadata values are often strings
+                "first_message_time": str(batch.first_timestamp) if batch.first_timestamp else "",
                 "archive_time": timestamp.isoformat(),
                 "compression": "zstd"
             }
 
-            # Compress messages with zstandard
             compressor = zstandard.ZstdCompressor(level=self.config['archival'].get('compression_level', 3))
             json_data = json.dumps(batch.messages).encode('utf-8')
             compressed_data = compressor.compress(json_data)
+            compressed_data_stream = io.BytesIO(compressed_data) # Use BytesIO for stream
+            compressed_data_len = len(compressed_data)
 
-            # Generate object path
-            object_name = self._get_object_path(queue_name, timestamp)
+            object_name = self._get_object_path(queue_name) # Call without timestamp
 
-            # Upload to MinIO with retry logic
             retries = 0
-            max_retries = self.config['error_handling'].get('max_retries', 3)
-            retry_delay = self.config['error_handling'].get('retry_delay', 5)
+            max_retries = self.config.get('error_handling', {}).get('max_retries', 3)
+            retry_delay = self.config.get('error_handling', {}).get('retry_delay', 5)
 
             while retries < max_retries:
                 try:
-                    self.minio_client.put_object(
-                        bucket_name=archive_config['bucket'],
-                        object_name=object_name,
-                        data=compressed_data,
-                        length=len(compressed_data),
-                        metadata=metadata
+                    await self.loop.run_in_executor(
+                        None,
+                        self.minio_client.put_object,
+                        archive_config['bucket'],
+                        object_name,
+                        compressed_data_stream,
+                        compressed_data_len,
+                        metadata=metadata,
+                        content_type='application/octet-stream' # More appropriate for compressed data
                     )
-                    break
+                    compressed_data_stream.seek(0) # Reset stream position if retrying, though new stream is made if error
+                    break 
                 except Exception as e:
                     retries += 1
                     logger.error(f"Failed to upload to MinIO (attempt {retries}/{max_retries}): {e}")
+                    compressed_data_stream.seek(0) # Reset stream for retry
                     if retries < max_retries:
                         await asyncio.sleep(retry_delay)
                     else:
                         raise
-
-            # Update metrics
-            MESSAGES_ARCHIVED.labels(queue=queue_name,
-                                  bucket=archive_config['bucket']).inc(len(batch.messages))
-            STORAGE_USAGE.labels(bucket=archive_config['bucket']).inc(len(compressed_data))
-
+            
+            MESSAGES_ARCHIVED.labels(queue=queue_name, bucket=archive_config['bucket']).inc(len(batch.messages))
+            STORAGE_USAGE.labels(bucket=archive_config['bucket']).inc(compressed_data_len)
             logger.info(f"Archived {len(batch.messages)} messages from {queue_name} to {object_name}")
             batch.clear()
 
         except Exception as e:
-            logger.error(f"Failed to archive batch from {queue_name}: {e}")
-            # Don't clear batch on error to retry later
+            logger.error(f"Failed to archive batch from {queue_name}: {e}", exc_info=True)
 
     async def _process_message(self, message: aio_pika.IncomingMessage):
         """Process a single message."""
-        async with message.process():
-            queue_name = message.routing_key
+        async with message.process(ignore_processed=True): # Auto ack/nack based on context
+            queue_name = message.routing_key or message.exchange # Fallback if routing_key is None
 
             try:
-                # Parse message body
                 body = json.loads(message.body.decode())
-
-                # Get or create batch for this queue
                 if queue_name not in self.batches:
                     archive_config = next(
-                        (a for a in self.config['archival']['archives']
-                         if queue_name in a['queues']),
-                        None
+                        (a for a in self.config['archival']['archives'] if queue_name in a['queues']), None
                     )
                     if not archive_config:
-                        logger.warning(f"No archive configuration for queue: {queue_name}")
+                        logger.warning(f"No archive configuration for queue/routing_key: {queue_name}. Message will be dropped after ack.")
+                        await message.ack() # Acknowledge to remove from queue
                         return
 
                     self.batches[queue_name] = MessageBatch(
                         max_size=archive_config.get('batch_size', 1000),
                         max_age=archive_config.get('batch_age', 300)
                     )
-
+                
                 batch = self.batches[queue_name]
-
-                # Add message to batch
                 if batch.add(body):
-                    # Batch is full, archive it
                     await self._archive_batch(queue_name, batch)
-
-                # Update batch size metric
+                
                 BATCH_SIZE.labels(queue=queue_name).set(len(batch.messages))
+                await message.ack()
 
             except json.JSONDecodeError:
                 logger.error(f"Failed to parse message from {queue_name}")
+                await message.reject(requeue=False) # Reject non-JSON messages
             except Exception as e:
-                logger.error(f"Error processing message from {queue_name}: {e}")
+                logger.error(f"Error processing message from {queue_name}: {e}", exc_info=True)
+                await message.nack(requeue=False) # Nack without requeue on other errors
 
     async def run(self):
         """Run the archiver."""
+        self.loop = asyncio.get_running_loop()
         try:
-            # Set up connections
             await self.setup()
-
-            # Start metrics server if enabled
             metrics_port = self.config.get('metrics', {}).get('port', 8000)
             if metrics_port:
                 start_http_server(metrics_port)
                 logger.info(f"Started metrics server on port {metrics_port}")
 
-            # Create queue bindings
+            if not self.channel:
+                 logger.error("RabbitMQ channel not available. Exiting.")
+                 return
+
             for archive_config in self.config['archival']['archives']:
                 for queue_name in archive_config['queues']:
-                    queue = await self.channel.declare_queue(
-                        queue_name,
-                        durable=True
-                    )
-
-                    # Start consuming
+                    queue = await self.channel.declare_queue(queue_name, durable=True)
                     await queue.consume(self._process_message)
                     logger.info(f"Started consuming from queue: {queue_name}")
-
-            # Run periodic batch check
+            
             check_interval = self.config['archival'].get('check_interval', 60)
             while not self.should_exit:
-                # Archive any full or aged batches
-                for queue_name, batch in self.batches.items():
+                for queue_name, batch in list(self.batches.items()): # Iterate copy for safe modification
                     if batch.is_full():
                         await self._archive_batch(queue_name, batch)
-
                 await asyncio.sleep(check_interval)
 
         except Exception as e:
-            logger.error(f"Fatal error: {e}")
+            logger.error(f"Fatal error in run loop: {e}", exc_info=True)
             self.should_exit = True
-
         finally:
-            # Clean up
-            if self.connection:
+            logger.info("Shutting down archiver...")
+            if self.connection and not self.connection.is_closed:
                 await self.connection.close()
+                logger.info("RabbitMQ connection closed.")
+            logger.info("Archiver shutdown complete.")
 
 def main():
     """Main entry point."""
     import argparse
-
     parser = argparse.ArgumentParser(description='RabbitMQ Data Archiver')
-    parser.add_argument('--config', '-c', type=str, default='config.yaml',
-                      help='Path to configuration file')
+    parser.add_argument('--config', '-c', type=str, default='config.yaml', help='Path to configuration file')
     args = parser.parse_args()
 
     archiver = DataArchiver(args.config)
-
+    
     try:
         asyncio.run(archiver.run())
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        logger.info("Archiver interrupted by user.")
+        archiver.should_exit = True 
+        # Allow run() to enter finally block or explicitly call a cleanup method if run() already exited
+        if archiver.loop and not archiver.loop.is_closed():
+             archiver.loop.run_until_complete(archiver.loop.create_task(asyncio.sleep(1))) # Give a moment for cleanup
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.critical(f"Archiver terminated with unhandled exception: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        logger.info("Archiver application shutdown finalized.")
 
 if __name__ == "__main__":
     main()
