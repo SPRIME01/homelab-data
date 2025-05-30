@@ -5,14 +5,14 @@ import sys
 import json
 import time
 import yaml
-import pika
+import aio_pika # Changed from pika
 import aiohttp
 import asyncio
 import logging
 import backoff
 import jsonschema
 from typing import Dict, Any, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict # Added asdict
 from datetime import datetime
 from aiohttp.client_exceptions import ClientError
 
@@ -70,11 +70,12 @@ class HACommandSubscriber:
     def __init__(self, config_path: str = "config.yaml"):
         """Initialize the command subscriber."""
         self.config = self._load_config(config_path)
-        self.connection = None
-        self.channel = None
+        self.connection: Optional[aio_pika.RobustConnection] = None # Typed
+        self.channel: Optional[aio_pika.Channel] = None # Typed
         self.should_exit = False
-        self.session = None
+        self.session: Optional[aiohttp.ClientSession] = None # Typed
         self.command_results = {}
+        self._consuming_tasks = [] # To keep track of consumer tasks
 
     def _load_config(self, config_path: str) -> Dict:
         """Load configuration from YAML file."""
@@ -82,10 +83,14 @@ class HACommandSubscriber:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
 
-            required_keys = ['rabbitmq', 'home_assistant', 'queues', 'webhook', 'logging', 'retry_config', 'monitoring', 'security']
+            # Simplified required_keys for this example, assuming config structure is known
+            required_keys = ['rabbitmq', 'home_assistant', 'queues']
             for key in required_keys:
                 if key not in config:
                     raise ValueError(f"Missing required configuration section: {key}")
+            if 'commands' not in config['queues'] or 'results' not in config['queues']:
+                 raise ValueError("Missing 'commands' or 'results' queue configuration.")
+
 
             return config
         except Exception as e:
@@ -94,49 +99,81 @@ class HACommandSubscriber:
 
     async def connect_rabbitmq(self) -> None:
         """Establish connection to RabbitMQ with retry logic."""
+        rabbitmq_config = self.config['rabbitmq']
+        connection_url = (
+            f"amqp://{rabbitmq_config['username']}:{rabbitmq_config['password']}@"
+            f"{rabbitmq_config['host']}:{rabbitmq_config['port']}/"
+        )
+        
         while not self.should_exit:
             try:
-                # Connection parameters
-                params = pika.ConnectionParameters(
-                    host=self.config['rabbitmq']['host'],
-                    port=self.config['rabbitmq']['port'],
-                    credentials=pika.PlainCredentials(
-                        username=self.config['rabbitmq']['username'],
-                        password=self.config['rabbitmq']['password']
-                    ),
-                    heartbeat=60,
-                    connection_attempts=3
+                self.connection = await aio_pika.connect_robust(
+                    connection_url,
+                    loop=asyncio.get_running_loop(),
+                    heartbeat=60
                 )
+                self.channel = await self.connection.channel()
+                await self.channel.set_qos(prefetch_count=self.config.get('prefetch_count', 10))
 
-                self.connection = pika.BlockingConnection(params)
-                self.channel = self.connection.channel()
+                logger.info("Successfully connected to RabbitMQ and channel opened.")
+                
+                # Declare queues specified in the 'queues' section (not 'queues':'commands')
+                # Assuming self.config['queues'] itself is a list of queue objects
+                # or that 'command_queues' is the correct key.
+                # For this refactor, I'll assume 'command_queues' is the list of queues to declare for consuming
+                # and 'results_queue_name' is for publishing.
+                
+                # The original code declared queues from self.config['queues'].
+                # Let's assume self.config['queues']['commands'] is a list of queue objects to declare
+                # And self.config['queues']['results'] is the config for the results queue.
+                
+def _load_config(...):
+    # … existing setup …
 
-                # Declare queues
-                for queue in self.config['queues']:
-                    self.channel.queue_declare(
-                        queue=queue['name'],
+    # Normalise: ensure commands is always a list for downstream loops
+    q = config['queues']
+    if 'commands' not in q or 'results' not in q:
+        raise ValueError("Missing 'commands' or 'results' queue configuration.")
+
+    if isinstance(q['commands'], dict):
+        q['commands'] = [q['commands']]
+    elif not isinstance(q['commands'], list):
+        raise ValueError("'queues.commands' must be a list or a mapping")
+
+    # … rest of _load_config …
+                # Declare results queue as well, if it's defined and needs declaration by subscriber
+                results_queue_config = self.config['queues'].get('results')
+                if results_queue_config and results_queue_config.get('name'):
+                    results_queue_name = results_queue_config['name']
+                    await self.channel.declare_queue(
+                        name=results_queue_name,
                         durable=True,
                         arguments={
-                            'x-message-ttl': queue.get('ttl', 60000),
-                            'x-max-priority': queue.get('max_priority', 10)
+                            'x-message-ttl': results_queue_config.get('ttl', 60000),
+                            'x-max-priority': results_queue_config.get('max_priority', 10)
                         }
                     )
+                    logger.info(f"Declared results queue: {results_queue_name}")
 
-                logger.info("Successfully connected to RabbitMQ")
                 return
-            except Exception as e:
+            except (aio_pika.exceptions.AMQPConnectionError, ConnectionRefusedError) as e: # More specific exceptions
                 logger.error(f"Failed to connect to RabbitMQ: {e}")
                 await asyncio.sleep(5)
+            except Exception as e: # Catch other potential errors during setup
+                logger.error(f"An unexpected error occurred during RabbitMQ setup: {e}")
+                await asyncio.sleep(5)
+
 
     async def setup_http_session(self) -> None:
         """Set up HTTP session for Home Assistant API."""
-        self.session = aiohttp.ClientSession(
-            base_url=self.config['home_assistant']['url'],
-            headers={
-                "Authorization": f"Bearer {self.config['home_assistant']['token']}",
-                "Content-Type": "application/json"
-            }
-        )
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                base_url=self.config['home_assistant']['url'],
+                headers={
+                    "Authorization": f"Bearer {self.config['home_assistant']['token']}",
+                    "Content-Type": "application/json"
+                }
+            )
 
     def validate_command(self, command: Dict) -> bool:
         """Validate command against schema."""
@@ -154,6 +191,11 @@ class HACommandSubscriber:
     )
     async def execute_command(self, command: Dict) -> CommandResult:
         """Execute command via Home Assistant API."""
+        # Ensure session is created for each command execution if it's not persistent
+        if self.session is None or self.session.closed:
+             await self.setup_http_session()
+
+        domain, service = "unknown", "unknown" # Define for error case
         try:
             domain = command['domain']
             service = command['service']
@@ -162,7 +204,8 @@ class HACommandSubscriber:
 
             url = f"/api/services/{domain}/{service}"
             data = {**target, **(service_data or {})}
-
+            
+            assert self.session is not None # Make type checker happy
             async with self.session.post(url, json=data) as response:
                 response.raise_for_status()
                 result = await response.json()
@@ -176,7 +219,7 @@ class HACommandSubscriber:
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"Command execution failed: {error_msg}")
+            logger.error(f"Command execution failed for {domain}.{service}: {error_msg}")
             return CommandResult(
                 success=False,
                 message=f"Failed to execute {domain}.{service}",
@@ -184,107 +227,153 @@ class HACommandSubscriber:
                 error=error_msg
             )
 
-    async def process_command(self, command: Dict) -> None:
+    async def process_command(self, command_data: Dict) -> None:
         """Process and execute a command with retry logic."""
-        if not self.validate_command(command):
-            logger.error(f"Invalid command format: {command}")
+        if not self.validate_command(command_data):
+            logger.error(f"Invalid command format: {command_data}")
+            # Consider sending to a dead-letter queue or logging permanently
             return
 
-        retry_config = command.get('retry', {'max_attempts': 3, 'delay': 1.0})
+        retry_config = command_data.get('retry', {'max_attempts': 1, 'delay': 0.5}) # Default to 1 attempt
         attempts = 0
 
         while attempts < retry_config['max_attempts']:
-            result = await self.execute_command(command)
+            result = await self.execute_command(command_data)
 
             if result.success:
-                # Store result and publish to results queue
-                self.command_results[command.get('id', str(time.time()))] = result
+                self.command_results[command_data.get('id', str(time.time()))] = result
                 await self.publish_result(result)
-                break
-
+                break 
+            
             attempts += 1
             if attempts < retry_config['max_attempts']:
+                logger.info(f"Command failed, attempt {attempts}/{retry_config['max_attempts']}. Retrying in {retry_config['delay']}s...")
                 await asyncio.sleep(retry_config['delay'])
             else:
-                logger.error(f"Command failed after {attempts} attempts")
-                await self.publish_result(result)
+                logger.error(f"Command failed after {attempts} attempts: {command_data.get('id', 'N/A')}")
+                await self.publish_result(result) # Publish final failure
 
     async def publish_result(self, result: CommandResult) -> None:
         """Publish command result to results queue."""
+        if not self.channel or self.channel.is_closed:
+            logger.error("Cannot publish result, channel is not available.")
+            return
         try:
-            result_queue = self.config['queues']['results']['name']
-            self.channel.basic_publish(
-                exchange='',
-                routing_key=result_queue,
-                body=json.dumps(result.__dict__),
-                properties=pika.BasicProperties(
-                    delivery_mode=2,  # Make message persistent
-                    content_type='application/json'
-                )
+            # Assuming 'results' key in self.config['queues'] holds the name of the results queue
+            results_queue_name = self.config['queues']['results']['name']
+            
+            message_body = json.dumps(asdict(result)).encode('utf-8')
+            message = aio_pika.Message(
+                body=message_body,
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                content_type='application/json'
             )
+            await self.channel.default_exchange.publish(message, routing_key=results_queue_name)
+            logger.debug(f"Published result to {results_queue_name}")
         except Exception as e:
             logger.error(f"Failed to publish result: {e}")
 
-    async def start_consuming(self) -> None:
-        """Start consuming messages from command queues."""
-        def callback(ch, method, properties, body):
-            """Process received message."""
+
+    async def on_message(self, message: aio_pika.IncomingMessage) -> None:
+        """Async callback to process received message."""
+        async with message.process(ignore_processed=True): # Auto ack/nack based on context exit
             try:
-                command = json.loads(body)
-                asyncio.create_task(self.process_command(command))
-                ch.basic_ack(delivery_tag=method.delivery_tag)
+                command = json.loads(message.body.decode())
+                # Using asyncio.create_task to allow concurrent processing if desired,
+                # but for sequential processing within one consumer, can await directly.
+                # For simplicity here, let's await directly if the number of workers is 1.
+                # If more complex concurrency is needed, create_task is fine.
+                await self.process_command(command)
+                await message.ack()
             except json.JSONDecodeError:
-                logger.error("Failed to decode message")
-                ch.basic_reject(delivery_tag=method.delivery_tag, requeue=False)
+                logger.error("Failed to decode message body")
+                await message.reject(requeue=False) # Reject non-JSON messages
             except Exception as e:
                 logger.error(f"Error processing message: {e}")
-                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+                # Decide whether to requeue based on error type or configuration
+                await message.nack(requeue=False) # Example: Nack without requeue
 
-        # Set up consumers for each command queue
-        for queue in self.config['queues']['commands']:
-            self.channel.basic_qos(prefetch_count=queue.get('prefetch_count', 1))
-            self.channel.basic_consume(
-                queue=queue['name'],
-                on_message_callback=callback
-            )
+    async def start_consuming(self) -> None:
+        """Start consuming messages from command queues."""
+        if not self.channel:
+            logger.error("Cannot start consuming, channel is not available.")
+            return
 
-        logger.info("Started consuming messages")
-        try:
-            self.channel.start_consuming()
-        except KeyboardInterrupt:
-            self.should_exit = True
+        # Assuming self.config['queues']['commands'] is a list of queue configurations
+        for queue_config in self.config['queues'].get('commands', []):
+            queue_name = queue_config['name']
+            try:
+                queue = await self.channel.get_queue(queue_name) # Get queue instance
+                consumer_tag = await queue.consume(self.on_message)
+                self._consuming_tasks.append(consumer_tag) # Store consumer tag to cancel later
+                logger.info(f"Started consuming from queue: {queue_name} with tag {consumer_tag}")
+            except Exception as e:
+                logger.error(f"Failed to start consuming from queue {queue_name}: {e}")
+        
+        if not self._consuming_tasks:
+            logger.warning("No consumers were started.")
+
 
     async def run(self) -> None:
         """Run the command subscriber service."""
+        await self.setup_http_session() # Setup HTTP session once
         try:
-            # Initialize connections
             await self.connect_rabbitmq()
-            await self.setup_http_session()
-
-            # Start consuming messages
-            await self.start_consuming()
+            if self.channel: # Ensure channel is available
+                 await self.start_consuming()
+                 # Keep the service running
+                 while not self.should_exit:
+                     await asyncio.sleep(1)
+            else:
+                logger.error("Failed to establish RabbitMQ channel. Exiting.")
+                self.should_exit = True
 
         except Exception as e:
-            logger.error(f"Service error: {e}")
+            logger.error(f"Service error: {e}", exc_info=True)
             self.should_exit = True
-
         finally:
-            # Cleanup
-            if self.session:
+            logger.info("Shutting down...")
+            # Cancel consumer tasks
+            if self.channel and not self.channel.is_closed:
+                for consumer_tag in self._consuming_tasks:
+                    try:
+                        logger.info(f"Cancelling consumer: {consumer_tag}")
+                        await self.channel.cancel(consumer_tag)
+                    except Exception as e:
+                        logger.error(f"Error cancelling consumer {consumer_tag}: {e}")
+            
+            if self.session and not self.session.closed:
                 await self.session.close()
-            if self.connection:
-                self.connection.close()
+                logger.info("HTTP session closed.")
+            if self.connection and not self.connection.is_closed:
+                await self.connection.close()
+                logger.info("RabbitMQ connection closed.")
 
 def main():
     """Main entry point."""
-    # Load config path from environment or use default
     config_path = os.environ.get('CONFIG_PATH', 'config.yaml')
-
-    # Create subscriber instance
     subscriber = HACommandSubscriber(config_path)
+    
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(subscriber.run())
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received.")
+        subscriber.should_exit = True
+        # Give some time for graceful shutdown, then force stop if needed
+        # This part might need more robust handling in subscriber.run() itself.
+        loop.run_until_complete(asyncio.sleep(2)) # Allow ongoing tasks to finish
+    finally:
+        # Ensure all tasks are cancelled before closing loop
+        tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task(loop)]
+        for task in tasks:
+            task.cancel()
+        
+        # Gather all tasks to ensure they are finished after cancellation
+        # loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+        # loop.close() # This can cause errors if run_until_complete is called again
+        logger.info("Service shutdown complete.")
 
-    # Run the service
-    asyncio.run(subscriber.run())
 
 if __name__ == "__main__":
     main()

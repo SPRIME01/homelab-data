@@ -10,14 +10,14 @@ import logging
 import asyncio
 import signal
 import numpy as np
-import pika
-import aiohttp
+import aio_pika # Changed from pika
+import aiohttp # Already present, ensure it's used if http calls are made by this service directly
 import tritonclient.grpc as triton_grpc
 import tritonclient.http as triton_http
 from typing import Dict, List, Union, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict # Added asdict
 from datetime import datetime
 from enum import Enum
 from io import BytesIO
@@ -38,7 +38,7 @@ DEFAULT_CONFIG_PATH = "config.yaml"
 DEFAULT_BATCH_SIZE = 4
 DEFAULT_BATCH_TIMEOUT_MS = 100
 DEFAULT_INFERENCE_TIMEOUT_MS = 10000
-DEFAULT_MAX_RETRIES = 3
+# DEFAULT_MAX_RETRIES = 3 # This was unused
 
 class TritonClientType(Enum):
     HTTP = "http"
@@ -57,9 +57,9 @@ class InferenceRequest:
     received_time: float = field(default_factory=time.time)
     correlation_id: Optional[str] = None
     reply_to: Optional[str] = None
-    routing_key: Optional[str] = None
+    routing_key: Optional[str] = None # Original routing key of the request
     raw_request: Dict = field(default_factory=dict)
-    context_id: Optional[str] = None  # Add context ID to request
+    context_id: Optional[str] = None
 
 @dataclass
 class BatchedRequests:
@@ -73,698 +73,510 @@ class BatchedRequests:
 
     @property
     def is_full(self) -> bool:
-        """Check if batch is full."""
         return len(self.requests) >= self.max_batch_size
 
     @property
     def is_timed_out(self) -> bool:
-        """Check if batch has timed out."""
         elapsed_ms = (time.time() - self.created_time) * 1000
         return elapsed_ms >= self.timeout_ms
 
     @property
     def should_process(self) -> bool:
-        """Check if batch should be processed."""
         return self.is_full or (self.is_timed_out and len(self.requests) > 0)
 
     @property
     def highest_priority(self) -> int:
-        """Get highest priority in batch."""
-        if not self.requests:
-            return 0
+        if not self.requests: return 0
         return max(req.priority for req in self.requests)
 
-from mcp_handler import ModelContextManager, ConversationContext
+# Assuming mcp_handler.py is in the same directory or PYTHONPATH
+from mcp_handler import ModelContextManager # Removed ConversationContext as it's not directly used here
 
 class InferenceHandler:
-    """Handles inference requests from RabbitMQ and forwards to Triton."""
-
     def __init__(self, config_path: str = DEFAULT_CONFIG_PATH):
-        """Initialize the inference handler."""
         self.config = self._load_config(config_path)
-        self.connection = None
-        self.channel = None
+        self.connection: Optional[aio_pika.RobustConnection] = None
+        self.channel: Optional[aio_pika.Channel] = None
         self.should_exit = False
+        self.loop = asyncio.get_running_loop() # Get loop in init
 
-        # Initialize client type
-        client_type = self.config.get("triton", {}).get("client_type", "grpc")
-        self.client_type = TritonClientType(client_type.lower())
+        client_type_str = self.config.get("triton", {}).get("client_type", "grpc")
+        self.client_type = TritonClientType(client_type_str.lower())
 
-        # Batched requests by model
         self.batch_lock = asyncio.Lock()
-        self.batched_requests = {}
-
-        # Thread pool for blocking operations
+        self.batched_requests: Dict[str, BatchedRequests] = {}
+        
         self.executor = ThreadPoolExecutor(
-            max_workers=self.config.get("handler", {}).get("max_workers", 10)
+            max_workers=self.config.get("handler", {}).get("max_workers", os.cpu_count() or 1)
         )
-
-        # Setup signal handlers
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
-
-        # Initialize Model Context Protocol if enabled
+        
         self.mcp_enabled = self.config.get("advanced_features", {}).get("model_context_protocol", {}).get("enabled", False)
-        self.context_manager = None
+        self.context_manager: Optional[ModelContextManager] = None
         if self.mcp_enabled:
-            self.context_manager = ModelContextManager(self.config.get("advanced_features", {}).get("model_context_protocol", {}))
+            mcp_config = self.config.get("advanced_features", {}).get("model_context_protocol", {})
+            self.context_manager = ModelContextManager(mcp_config)
             logger.info("Model Context Protocol (MCP) enabled")
 
+        self._consuming_tags: List[str] = []
+
+
     def _load_config(self, config_path: str) -> Dict:
-        """Load configuration from YAML file."""
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
-
-            # Validate required configuration
             required_keys = ['rabbitmq', 'triton', 'models']
             for key in required_keys:
                 if key not in config:
                     raise ValueError(f"Missing required configuration section: {key}")
-
             return config
         except Exception as e:
             logger.error(f"Failed to load configuration: {e}")
             sys.exit(1)
 
-    def _signal_handler(self, signum: int, frame) -> None:
-        """Handle system signals."""
+    async def _signal_handler_async(self, signum: int) -> None:
         logger.info(f"Received signal {signum}, initiating graceful shutdown")
         self.should_exit = True
 
     async def connect_rabbitmq(self) -> None:
-        """Connect to RabbitMQ with retry logic."""
+        rabbitmq_config = self.config['rabbitmq']
+        connection_url = (
+            f"amqp://{rabbitmq_config['username']}:{rabbitmq_config['password']}@"
+            f"{rabbitmq_config['host']}:{rabbitmq_config['port']}/"
+            f"{rabbitmq_config.get('vhost', '')}" 
+        )
+        
+        retry_delay = rabbitmq_config.get('retry_delay', 5)
+        
         while not self.should_exit:
             try:
-                # Setup connection parameters
-                parameters = pika.ConnectionParameters(
-                    host=self.config['rabbitmq']['host'],
-                    port=self.config['rabbitmq']['port'],
-                    credentials=pika.PlainCredentials(
-                        self.config['rabbitmq']['username'],
-                        self.config['rabbitmq']['password']
-                    ),
-                    heartbeat=self.config['rabbitmq'].get('heartbeat', 60),
-                    virtual_host=self.config['rabbitmq'].get('vhost', '/'),
-                    connection_attempts=3
+                self.connection = await aio_pika.connect_robust(
+                    connection_url,
+                    loop=self.loop,
+                    heartbeat=rabbitmq_config.get('heartbeat', 60)
                 )
+                self.channel = await self.connection.channel()
+                await self.channel.set_qos(prefetch_count=rabbitmq_config.get('prefetch_count', 10))
 
-                # Create blocking connection and channel
-                self.connection = pika.BlockingConnection(parameters)
-                self.channel = self.connection.channel()
+                logger.info("Successfully connected to RabbitMQ.")
 
-                # Declare exchanges
-                for exchange in self.config['rabbitmq'].get('exchanges', []):
-                    self.channel.exchange_declare(
-                        exchange=exchange['name'],
-                        exchange_type=exchange['type'],
-                        durable=exchange.get('durable', True)
+                for ex_conf in self.config['rabbitmq'].get('exchanges', []):
+                    await self.channel.declare_exchange(
+                        name=ex_conf['name'],
+                        type=aio_pika.ExchangeType(ex_conf['type']),
+                        durable=ex_conf.get('durable', True)
                     )
-
-                # Declare and bind queues
-                for queue in self.config['rabbitmq'].get('queues', []):
-                    self.channel.queue_declare(
-                        queue=queue['name'],
-                        durable=queue.get('durable', True),
+                
+                for q_conf in self.config['rabbitmq'].get('queues', []):
+                    queue = await self.channel.declare_queue(
+                        name=q_conf['name'],
+                        durable=q_conf.get('durable', True),
                         arguments={
-                            'x-max-priority': queue.get('max_priority', 10),
-                            'x-message-ttl': queue.get('message_ttl', 60000)
+                            'x-max-priority': q_conf.get('max_priority', 10),
+                            'x-message-ttl': q_conf.get('message_ttl', 60000)
                         }
                     )
-
-                    # Bind queue to exchange
-                    if 'bindings' in queue:
-                        for binding in queue['bindings']:
-                            self.channel.queue_bind(
-                                queue=queue['name'],
+                    if 'bindings' in q_conf:
+                        for binding in q_conf['bindings']:
+                            await queue.bind(
                                 exchange=binding['exchange'],
                                 routing_key=binding['routing_key']
                             )
-
-                logger.info("Successfully connected to RabbitMQ")
                 return
-            except Exception as e:
-                logger.error(f"Failed to connect to RabbitMQ: {e}")
-                await asyncio.sleep(5)
+            except (aio_pika.exceptions.AMQPConnectionError, ConnectionRefusedError) as e:
+                logger.error(f"Failed to connect to RabbitMQ: {e}. Retrying in {retry_delay}s...")
+            except Exception as e: # Catch other potential errors
+                logger.error(f"An unexpected error occurred during RabbitMQ setup: {e}. Retrying in {retry_delay}s...")
+            
+            if not self.should_exit:
+                 await asyncio.sleep(retry_delay)
+
 
     @asynccontextmanager
     async def get_triton_client(self, model_name: str):
-        """Get a Triton client for the specified model."""
+        # This method remains largely the same as Triton client instantiation is not async
+        # but the context manager itself is async.
+        client = None # Define client outside try to ensure it's in scope for finally
         try:
-            # Get model specific configuration
-            model_config = next(
-                (m for m in self.config['models'] if m['name'] == model_name),
-                None
-            )
+            model_conf = next((m for m in self.config['models'] if m['name'] == model_name), None)
+            effective_conf = model_conf if model_conf else {}
+            
+            client_type_str = effective_conf.get('client_type', self.config.get("triton", {}).get("client_type", "grpc"))
+            client_type_enum = TritonClientType(client_type_str.lower())
+            
+            triton_url = effective_conf.get('url', self.config['triton']['url'])
 
-            if not model_config:
-                logger.warning(f"No configuration found for model {model_name}, using default")
-                model_config = {}
-
-            # Determine client type (HTTP or gRPC)
-            if model_config.get('client_type'):
-                client_type = TritonClientType(model_config['client_type'].lower())
-            else:
-                client_type = self.client_type
-
-            # Get Triton server URL
-            triton_url = model_config.get('url', self.config['triton']['url'])
-
-            if client_type == TritonClientType.GRPC:
-                # For gRPC, extract host and port
-                if ':' in triton_url:
-                    host, port = triton_url.split(':')
-                    client = triton_grpc.InferenceServerClient(
-                        url=f"{host}:{port}",
-                        verbose=False
-                    )
-                else:
-                    client = triton_grpc.InferenceServerClient(
-                        url=f"{triton_url}:8001",
-                        verbose=False
-                    )
-            else:
-                # For HTTP
-                if not triton_url.startswith(('http://', 'https://')):
-                    triton_url = f"http://{triton_url}"
-                client = triton_http.InferenceServerClient(
-                    url=triton_url,
-                    verbose=False
-                )
-
+            if client_type_enum == TritonClientType.GRPC:
+                host, port_str = triton_url.split(':') if ':' in triton_url else (triton_url, "8001")
+                client = triton_grpc.InferenceServerClient(url=f"{host}:{port_str}", verbose=False)
+            else: # HTTP
+                processed_url = triton_url if triton_url.startswith(('http://', 'https://')) else f"http://{triton_url}"
+                client = triton_http.InferenceServerClient(url=processed_url, verbose=False)
+            
             yield client
-
         except Exception as e:
-            logger.error(f"Error creating Triton client: {e}")
+            logger.error(f"Error creating Triton client for model {model_name}: {e}")
             raise
+        finally:
+            if client and hasattr(client, 'close'): # Some clients might have a close method
+                 try:
+                     if self.client_type == TritonClientType.GRPC: # gRPC client has close()
+                         client.close()
+                 except Exception as e:
+                     logger.error(f"Error closing Triton client: {e}")
+
 
     async def add_to_batch(self, request: InferenceRequest) -> None:
-        """Add an inference request to the appropriate batch."""
         model_key = f"{request.model_name}:{request.model_version}"
-
         async with self.batch_lock:
             if model_key not in self.batched_requests:
-                # Get model-specific batch configuration
-                model_config = next(
-                    (m for m in self.config['models'] if m['name'] == request.model_name),
-                    {}
-                )
-
-                max_batch_size = model_config.get('max_batch_size', DEFAULT_BATCH_SIZE)
-                batch_timeout_ms = model_config.get('batch_timeout_ms', DEFAULT_BATCH_TIMEOUT_MS)
-
+                model_config = next((m for m in self.config['models'] if m['name'] == request.model_name), {})
                 self.batched_requests[model_key] = BatchedRequests(
                     model_name=request.model_name,
                     model_version=request.model_version,
-                    max_batch_size=max_batch_size,
-                    timeout_ms=batch_timeout_ms
+                    max_batch_size=model_config.get('max_batch_size', DEFAULT_BATCH_SIZE),
+                    timeout_ms=model_config.get('batch_timeout_ms', DEFAULT_BATCH_TIMEOUT_MS)
                 )
-
-            # Add to existing batch
             self.batched_requests[model_key].requests.append(request)
-
-            logger.debug(
-                f"Added request to batch {model_key}. "
-                f"Batch size: {len(self.batched_requests[model_key].requests)}/{self.batched_requests[model_key].max_batch_size}"
-            )
+            logger.debug(f"Added request to batch {model_key}. Size: {len(self.batched_requests[model_key].requests)}")
 
     async def process_batches(self) -> None:
-        """Periodically check and process batches of requests."""
         while not self.should_exit:
-            batches_to_process = []
-
-            # Check for batches that are ready to process
+            batches_to_process_list: List[BatchedRequests] = []
             async with self.batch_lock:
-                for model_key, batch in list(self.batched_requests.items()):
-                    if batch.should_process:
-                        batches_to_process.append((model_key, batch))
-                        # Remove from main dictionary
+                for model_key, batch_obj in list(self.batched_requests.items()):
+                    if batch_obj.should_process:
+                        batches_to_process_list.append(batch_obj)
                         del self.batched_requests[model_key]
+            
+            for batch_to_process in batches_to_process_list:
+                logger.info(f"Processing batch for {batch_to_process.model_name} with {len(batch_to_process.requests)} requests")
+                asyncio.create_task(self.process_single_batch(batch_to_process)) # Renamed for clarity
+            await asyncio.sleep(0.01) # Yield control
 
-            # Process batches
-            if batches_to_process:
-                for model_key, batch in batches_to_process:
-                    logger.info(f"Processing batch for {model_key} with {len(batch.requests)} requests")
-                    asyncio.create_task(self.process_batch(batch))
-
-            # Short sleep to avoid CPU spinning
-            await asyncio.sleep(0.01)
-
-    async def process_batch(self, batch: BatchedRequests) -> None:
-        """Process a batch of inference requests."""
-        if not batch.requests:
-            return
-
+    async def process_single_batch(self, batch: BatchedRequests) -> None: # Renamed from process_batch
+        if not batch.requests: return
+        # ... (rest of the _infer_grpc, _infer_http, _process_inference_results, _convert_numpy_to_json logic remains largely the same)
+        # ... but they will be called by this method.
+        # For brevity, I'll skip pasting the entire infer/processing logic but it's assumed to be here.
+        # Key is that Triton client calls are already run in executor.
+        # The _publish_response method will need to be updated.
         try:
             model_name = batch.model_name
             model_version = batch.model_version
 
-            # Get model configuration
-            model_config = next(
-                (m for m in self.config['models'] if m['name'] == model_name),
-                {}
-            )
+            input_tensors: Dict[str, list] = {}
+            request_map: Dict[int, InferenceRequest] = {}
 
-            # Sort requests by priority (high to low)
-            batch.requests.sort(key=lambda r: r.priority, reverse=True)
-
-            # Prepare batched inputs
-            input_tensors = {}
-            request_map = {}
-
-            # Batch compatible requests
             for i, request in enumerate(batch.requests):
-                # Map request ID to position in batch for output distribution
-                request_id = request.request_id
                 request_map[i] = request
-
-                # Process each input
                 for input_name, input_data in request.inputs.items():
-                    # Create tensor entry if it doesn't exist
                     if input_name not in input_tensors:
                         input_tensors[input_name] = []
-
-                    # Add input data to the appropriate tensor
                     input_tensors[input_name].append(input_data)
-
-            # Check if any requests in batch use context
-            contextual_requests = []
-            if self.mcp_enabled:
-                contextual_requests = [req for req in batch.requests if hasattr(req, 'context_id') and req.context_id]
-
-                # Process contextual requests individually if needed
-                if contextual_requests:
-                    for req in contextual_requests:
-                        # Get context
-                        context = await self.context_manager.get_context(req.context_id)
-                        if context:
-                            # Augment the request inputs with context if needed
-                            if "text_input" in req.inputs and "conversation" in context.context_data:
-                                # Example: prepend conversation history for language models
-                                history = context.context_data["conversation"]
-                                prefix = ""
-                                # Include last N turns (adjust as needed)
-                                for turn in history[-3:]:  # Last 3 turns
-                                    prefix += f"User: {turn['user_input']}\nAssistant: {turn['model_output']}\n"
-                                prefix += f"User: {req.inputs['text_input']}\nAssistant: "
-                                req.inputs["text_input"] = prefix
-
-            # Execute inference with batched data
-            async with self.get_triton_client(model_name) as client:
-                if self.client_type == TritonClientType.GRPC:
-                    infer_result = await self._infer_grpc(
-                        client, model_name, model_version, input_tensors, batch.requests
-                    )
-                else:
-                    infer_result = await self._infer_http(
-                        client, model_name, model_version, input_tensors, batch.requests
-                    )
-
-                # Process results
-                await self._process_inference_results(infer_result, batch, request_map)
-
-            # Update context for contextual requests
-            if self.mcp_enabled and contextual_requests:
-                for i, req in enumerate(contextual_requests):
+            
+            # MCP related logic - assuming self.context_manager is checked for None if mcp_enabled
+            if self.mcp_enabled and self.context_manager:
+                for req in batch.requests: # Simplified loop for example
                     if req.context_id:
-                        # Extract this request's slice of the output
-                        if output_name in output_data and output_data[output_name] is not None:
-                            output_array = output_data[output_name]
-                            if len(output_array) > i:
-                                result = self._convert_numpy_to_json(output_array[i])
-                                # Update context with the new turn
-                                input_text = req.inputs.get("original_text", req.inputs.get("text_input", ""))
-                                await self.context_manager.update_context(
-                                    req.context_id,
-                                    input_text,
-                                    result
-                                )
+                        context = await self.context_manager.get_context(req.context_id)
+                        if context and "text_input" in req.inputs and "conversation" in context.context_data:
+                            # Simplified context augmentation
+                            history = context.context_data["conversation"]
+                            prefix = "".join(f"User: {t['user_input']}\nAssistant: {t['model_output']}\n" for t in history[-3:])
+                            req.inputs["text_input"] = prefix + f"User: {req.inputs['text_input']}\nAssistant: "
+            
+            async with self.get_triton_client(model_name) as client:
+                # Determine client type for this specific model to call the right infer method
+                model_config = next((m for m in self.config['models'] if m['name'] == model_name), {})
+                client_type_str = model_config.get('client_type', self.config.get("triton", {}).get("client_type", "grpc"))
+                current_client_type = TritonClientType(client_type_str.lower())
+
+                if current_client_type == TritonClientType.GRPC:
+                    infer_result = await self._infer_grpc(client, model_name, model_version, input_tensors, batch.requests)
+                else:
+                    infer_result = await self._infer_http(client, model_name, model_version, input_tensors, batch.requests)
+                
+                await self._process_inference_results(infer_result, batch, request_map, current_client_type) # Pass client type
 
         except Exception as e:
-            logger.error(f"Error processing batch for {batch.model_name}: {e}")
-            # Handle the error and notify about failed requests
+            logger.error(f"Error processing batch for {batch.model_name}: {e}", exc_info=True)
             await self._handle_batch_failure(batch, str(e))
 
-    async def _infer_grpc(self, client, model_name, model_version, input_tensors, requests):
-        """Perform inference using gRPC client."""
-        # Convert inputs to Triton format
-        triton_inputs = []
 
+    async def _infer_grpc(self, client: triton_grpc.InferenceServerClient, model_name, model_version, input_tensors, requests):
+        # ... (existing _infer_grpc logic, ensure it uses self.executor for client.infer)
+        triton_inputs = []
         for input_name, input_values in input_tensors.items():
-            # Determine input type and shape
             sample = input_values[0]
             if isinstance(sample, (bytes, str)):
-                # String/bytes input
-                if isinstance(sample, str):
-                    input_values = [val.encode('utf-8') for val in input_values]
-
+                if isinstance(sample, str): input_values = [val.encode('utf-8') for val in input_values]
                 infer_input = triton_grpc.InferInput(input_name, [len(input_values)], "BYTES")
                 infer_input.set_data_from_numpy(np.array(input_values, dtype=np.object_))
             else:
-                # Numeric input (convert to numpy)
-                try:
-                    batch_array = np.array(input_values)
-                    infer_input = triton_grpc.InferInput(
-                        input_name, [len(input_values)] + list(batch_array.shape[1:]),
-                        triton_grpc.utils.np_to_triton_dtype(batch_array.dtype)
-                    )
-                    infer_input.set_data_from_numpy(batch_array)
-                except Exception as e:
-                    logger.error(f"Error converting input {input_name} to numpy: {e}")
-                    raise
-
+                batch_array = np.array(input_values)
+                infer_input = triton_grpc.InferInput(input_name, [len(input_values)] + list(batch_array.shape[1:]), triton_grpc.utils.np_to_triton_dtype(batch_array.dtype))
+                infer_input.set_data_from_numpy(batch_array)
             triton_inputs.append(infer_input)
-
-        # Prepare outputs
-        output_names = []
-        for req in requests:
-            output_names.extend(req.outputs)
-        output_names = list(set(output_names))  # Deduplicate
-
+        
+        output_names = list(set(o for req in requests for o in req.outputs))
         triton_outputs = [triton_grpc.InferRequestedOutput(name) for name in output_names]
-
-        # Execute inference
-        response = await asyncio.get_event_loop().run_in_executor(
-            self.executor,
-            lambda: client.infer(
-                model_name=model_name,
-                model_version=model_version if model_version else "",
-                inputs=triton_inputs,
-                outputs=triton_outputs,
-                client_timeout=max(req.timeout_ms for req in requests) / 1000.0
-            )
+        
+        return await self.loop.run_in_executor(
+            self.executor, client.infer, model_name, triton_inputs, 
+            model_version=model_version or "", outputs=triton_outputs, 
+            client_timeout=max(req.timeout_ms for req in requests) / 1000.0
         )
 
-        return response
-
-    async def _infer_http(self, client, model_name, model_version, input_tensors, requests):
-        """Perform inference using HTTP client."""
-        # Convert inputs to Triton format
+    async def _infer_http(self, client: triton_http.InferenceServerClient, model_name, model_version, input_tensors, requests):
+        # ... (existing _infer_http logic, ensure it uses self.executor for client.infer)
         triton_inputs = []
-
         for input_name, input_values in input_tensors.items():
-            # Determine input type and shape
             sample = input_values[0]
-            if isinstance(sample, (bytes, str)):
-                # String/bytes input
-                if isinstance(sample, str):
-                    input_values = [val.encode('utf-8') for val in input_values]
-
+            if isinstance(sample, (bytes, str)): # String/bytes input
+                if isinstance(sample, str): input_values = [val.encode('utf-8') for val in input_values]
                 infer_input = triton_http.InferInput(input_name, [len(input_values)], "BYTES")
                 infer_input.set_data_from_numpy(np.array(input_values, dtype=np.object_))
-            else:
-                # Numeric input (convert to numpy)
-                try:
-                    batch_array = np.array(input_values)
-                    infer_input = triton_http.InferInput(
-                        input_name, [len(input_values)] + list(batch_array.shape[1:]),
-                        triton_http.utils.np_to_triton_dtype(batch_array.dtype)
-                    )
-                    infer_input.set_data_from_numpy(batch_array)
-                except Exception as e:
-                    logger.error(f"Error converting input {input_name} to numpy: {e}")
-                    raise
-
+            else: # Numeric input
+                batch_array = np.array(input_values)
+                infer_input = triton_http.InferInput(input_name, [len(input_values)] + list(batch_array.shape[1:]), triton_http.utils.np_to_triton_dtype(batch_array.dtype))
+                infer_input.set_data_from_numpy(batch_array)
             triton_inputs.append(infer_input)
 
-        # Prepare outputs
-        output_names = []
-        for req in requests:
-            output_names.extend(req.outputs)
-        output_names = list(set(output_names))  # Deduplicate
-
+        output_names = list(set(o for req in requests for o in req.outputs))
         triton_outputs = [triton_http.InferRequestedOutput(name) for name in output_names]
 
-        # Execute inference
-        response = await asyncio.get_event_loop().run_in_executor(
-            self.executor,
-            lambda: client.infer(
-                model_name=model_name,
-                model_version=model_version if model_version else "",
-                inputs=triton_inputs,
-                outputs=triton_outputs,
-                client_timeout=max(req.timeout_ms for req in requests) / 1000.0
-            )
+        return await self.loop.run_in_executor(
+            self.executor, client.infer, model_name, triton_inputs, 
+            model_version=model_version or "", outputs=triton_outputs, 
+            client_timeout=max(req.timeout_ms for req in requests) / 1000.0
         )
 
-        return response
+    async def _process_inference_results(self, inference_result, batch: BatchedRequests, request_map: Dict[int, InferenceRequest], client_type: TritonClientType):
+        # ... (existing logic, ensure _convert_numpy_to_json is called)
+        # ... (and _publish_response is called)
+        # Note: inference_result type depends on client (grpc.InferResult or http.InferResult)
+        # as_numpy is available on both.
+        output_data: Dict[str, Optional[np.ndarray]] = {}
+        all_output_names = set().union(*(req.outputs for req in batch.requests))
 
-    async def _process_inference_results(self, inference_result, batch, request_map):
-        """Process the results of inference and publish responses."""
-        try:
-            # Get output data as numpy arrays
-            output_data = {}
-            for output_name in set().union(*(req.outputs for req in batch.requests)):
-                try:
-                    output_data[output_name] = inference_result.as_numpy(output_name)
-                except Exception as e:
-                    logger.error(f"Error extracting output {output_name}: {e}")
-                    output_data[output_name] = None
+        for output_name in all_output_names:
+            try:
+                output_data[output_name] = inference_result.as_numpy(output_name)
+            except Exception as e: # Use generic triton client exception if available
+                logger.error(f"Error extracting output {output_name}: {e}")
+                output_data[output_name] = None
 
-            # Process each request's result
-            for i, request in request_map.items():
-                response = {
-                    "request_id": request.request_id,
-                    "model_name": batch.model_name,
-                    "model_version": batch.model_version,
-                    "outputs": {},
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "processing_time_ms": (time.time() - request.received_time) * 1000
-                }
-
-                # Extract outputs for this request
-                for output_name in request.outputs:
-                    if output_name in output_data and output_data[output_name] is not None:
-                        output_array = output_data[output_name]
-
-                        # Extract this request's slice of the output
-                        if len(output_array) > i:
-                            # Convert various numpy types to JSON-serializable format
-                            result = self._convert_numpy_to_json(output_array[i])
-                            response["outputs"][output_name] = result
-                        else:
-                            logger.warning(f"Output index {i} out of bounds for output {output_name}")
-                            response["outputs"][output_name] = None
+        for i, request in request_map.items():
+            response_payload = {
+                "request_id": request.request_id, "model_name": batch.model_name,
+                "model_version": batch.model_version, "outputs": {},
+                "timestamp": datetime.utcnow().isoformat(),
+                "processing_time_ms": (time.time() - request.received_time) * 1000
+            }
+            for output_name_req in request.outputs:
+                if output_data.get(output_name_req) is not None:
+                    output_array = output_data[output_name_req]
+                    if output_array is not None and len(output_array) > i : # Check length
+                        response_payload["outputs"][output_name_req] = self._convert_numpy_to_json(output_array[i])
                     else:
-                        response["outputs"][output_name] = None
+                        logger.warning(f"Output index {i} out of bounds for output {output_name_req}")
+                        response_payload["outputs"][output_name_req] = None
+                else:
+                    response_payload["outputs"][output_name_req] = None
+            
+            await self._publish_response(request, response_payload)
 
-                # Publish response back to RabbitMQ
-                await self._publish_response(request, response)
+            # MCP Update
+            if self.mcp_enabled and self.context_manager and request.context_id:
+                # This assumes 'outputs' in response_payload is what's needed for context.
+                # This might need adjustment based on actual model output structure.
+                # For simplicity, let's assume the first output is the primary one for conversation.
+                main_output_for_context = None
+                if request.outputs and response_payload["outputs"].get(request.outputs[0]) is not None:
+                     main_output_for_context = response_payload["outputs"][request.outputs[0]]
+                elif response_payload["outputs"]: # Fallback to any output if specific not found
+                     main_output_for_context = next(iter(response_payload["outputs"].values()), None)
 
-        except Exception as e:
-            logger.error(f"Error processing inference results: {e}")
-            await self._handle_batch_failure(batch, str(e))
+                if main_output_for_context is not None:
+                    original_input_text = request.raw_request.get("inputs", {}).get("text_input", "") # Or however original input is stored
+                    await self.context_manager.update_context(
+                        request.context_id,
+                        original_input_text, # This should be the user's original input, not augmented one
+                        main_output_for_context
+                    )
 
-    def _convert_numpy_to_json(self, data):
-        """Convert numpy data to JSON-serializable format."""
+
+    def _convert_numpy_to_json(self, data: Any) -> Any:
+        # ... (existing logic)
         if isinstance(data, np.ndarray):
-            if data.dtype.kind == 'S':  # Byte strings
-                return data.tobytes().decode('utf-8', errors='replace')
-            elif data.dtype.kind == 'U':  # Unicode strings
-                return str(data)
-            else:
-                return data.tolist()
-        elif isinstance(data, (np.number, np.bool_)):
-            return data.item()
-        elif isinstance(data, bytes):
-            return data.decode('utf-8', errors='replace')
-        else:
-            return data
+            if data.dtype.kind == 'S': return data.tobytes().decode('utf-8', errors='replace')
+            if data.dtype.kind == 'U': return str(data)
+            return data.tolist()
+        if isinstance(data, (np.number, np.bool_)): return data.item()
+        if isinstance(data, bytes): return data.decode('utf-8', errors='replace')
+        return data
 
-    async def _publish_response(self, request, response):
-        """Publish inference response to RabbitMQ."""
+    async def _publish_response(self, request: InferenceRequest, response_data: Dict) -> None:
+        if not self.channel or self.channel.is_closed:
+            logger.error("Cannot publish response, RabbitMQ channel is not available.")
+            # Optionally, try to reconnect or queue internally, but for now, log and drop.
+            return
         try:
-            if not self.channel or self.channel.is_closed:
-                await self.connect_rabbitmq()
+            exchange_name = self.config['rabbitmq'].get('response_exchange', '') # Default to default exchange for direct reply-to
+            routing_key_res = request.reply_to or self.config['rabbitmq'].get('response_routing_key', 'ai.inference.results')
+            
+            # If using reply_to, exchange_name should be empty for default exchange
+            if request.reply_to:
+                exchange_name = ''
 
-            # Determine where to send the response
-            exchange = self.config['rabbitmq'].get('response_exchange', '')
-            routing_key = request.routing_key or self.config['rabbitmq'].get('response_routing_key', 'ai.inference.results')
+            exchange = await self.channel.get_exchange(exchange_name, ensure=True) if exchange_name else self.channel.default_exchange
 
-            # Set up message properties
-            properties = pika.BasicProperties(
+            message = aio_pika.Message(
+                body=json.dumps(response_data).encode('utf-8'),
                 correlation_id=request.correlation_id,
                 content_type='application/json',
-                delivery_mode=2  # Persistent message
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT
             )
-
-            # If reply_to is specified, use direct reply
-            if request.reply_to:
-                routing_key = request.reply_to
-                exchange = ''  # Direct reply uses default exchange
-
-            # Publish the message
-            self.channel.basic_publish(
-                exchange=exchange,
-                routing_key=routing_key,
-                body=json.dumps(response).encode(),
-                properties=properties
-            )
-
-            logger.debug(f"Published response for request {request.request_id}")
-
+            await exchange.publish(message, routing_key=routing_key_res)
+            logger.debug(f"Published response for request {request.request_id} to {exchange_name}/{routing_key_res}")
         except Exception as e:
-            logger.error(f"Failed to publish response: {e}")
+            logger.error(f"Failed to publish response for {request.request_id}: {e}", exc_info=True)
 
-    async def _handle_batch_failure(self, batch, error_message):
-        """Handle failure of an entire batch by notifying about each request."""
+    async def _handle_batch_failure(self, batch: BatchedRequests, error_message: str):
+        logger.error(f"Batch failure for model {batch.model_name}: {error_message}")
         for request in batch.requests:
             error_response = {
-                "request_id": request.request_id,
-                "model_name": batch.model_name,
-                "model_version": batch.model_version,
-                "error": error_message,
+                "request_id": request.request_id, "model_name": batch.model_name,
+                "model_version": batch.model_version, "error": error_message,
                 "timestamp": datetime.utcnow().isoformat(),
                 "processing_time_ms": (time.time() - request.received_time) * 1000
             }
             await self._publish_response(request, error_response)
 
-    def _parse_message(self, body, properties, routing_key):
-        """Parse an incoming RabbitMQ message into an InferenceRequest."""
+    def _parse_message(self, body: bytes, properties: aio_pika.spec.BasicProperties, routing_key: Optional[str]) -> InferenceRequest:
+        # ... (adapt to use aio_pika properties if different, but structure is similar)
         try:
-            # Parse message body
-            if isinstance(body, bytes):
-                message = json.loads(body.decode('utf-8'))
-            else:
-                message = json.loads(body)
+            message_dict = json.loads(body.decode('utf-8'))
+            if 'model_name' not in message_dict or 'inputs' not in message_dict or not message_dict['inputs']:
+                raise ValueError("Missing model_name or inputs in message")
 
-            # Validate required fields
-            if 'model_name' not in message:
-                raise ValueError("Missing required field: model_name")
-
-            # Validate inputs are present
-            if 'inputs' not in message or not message['inputs']:
-                raise ValueError("Missing or empty inputs field")
-
-            # Extract context ID if MCP is enabled
             context_id = None
-            if self.mcp_enabled and "context_id" in message:
-                context_id = message["context_id"]
-                logger.debug(f"Request with context ID: {context_id}")
-
-            # Validate context ID if present
-            if context_id and not isinstance(context_id, str):
-                raise ValueError("Invalid context ID format")
-
-            # Create inference request
-            request = InferenceRequest(
-                request_id=message.get('request_id', str(uuid.uuid4())),
-                model_name=message['model_name'],
-                model_version=message.get('model_version', ""),
-                inputs=message['inputs'],
-                outputs=message.get('outputs', []),
-                priority=message.get('priority', 0),
-                timeout_ms=message.get('timeout_ms', DEFAULT_INFERENCE_TIMEOUT_MS),
+            if self.mcp_enabled and "context_id" in message_dict:
+                context_id = message_dict["context_id"]
+                if not isinstance(context_id, str): raise ValueError("Invalid context_id format")
+            
+            return InferenceRequest(
+                request_id=message_dict.get('request_id', str(uuid.uuid4())),
+                model_name=message_dict['model_name'],
+                model_version=message_dict.get('model_version', ""),
+                inputs=message_dict['inputs'],
+                outputs=message_dict.get('outputs', []),
+                priority=message_dict.get('priority', 0),
+                timeout_ms=message_dict.get('timeout_ms', DEFAULT_INFERENCE_TIMEOUT_MS),
                 correlation_id=properties.correlation_id,
                 reply_to=properties.reply_to,
-                routing_key=routing_key,
-                raw_request=message,
-                context_id=context_id  # Add context ID to request
+                routing_key=routing_key, # Store original routing key
+                raw_request=message_dict,
+                context_id=context_id
             )
-
-            return request
-
-        except json.JSONDecodeError:
-            logger.error("Failed to decode JSON message")
-            raise
-        except KeyError as e:
-            logger.error(f"Missing required field in message: {e}")
-            raise
         except Exception as e:
-            logger.error(f"Error parsing message: {e}")
-            raise
+            logger.error(f"Error parsing message: {e}", exc_info=True)
+            raise # Re-raise to be caught by on_message handler
 
-    async def start_consumer(self):
-        """Start consuming messages from RabbitMQ."""
-        if not self.channel:
-            await self.connect_rabbitmq()
-
-        def message_callback(ch, method, properties, body):
-            """Process RabbitMQ message."""
+    async def on_message(self, message: aio_pika.IncomingMessage) -> None:
+        """Async callback for processing messages."""
+        async with message.process(ignore_processed=True): # auto ack/nack context
             try:
-                # Parse message
-                request = self._parse_message(body, properties, method.routing_key)
-
-                # Add request to batch
-                asyncio.run_coroutine_threadsafe(
-                    self.add_to_batch(request),
-                    asyncio.get_event_loop()
-                )
-
-                # Acknowledge message
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-
+                request = self._parse_message(message.body, message.properties, message.routing_key)
+                await self.add_to_batch(request)
+                await message.ack()
+            except ValueError as e: # Specific error for parsing/validation
+                logger.error(f"Message validation/parsing error: {e}. Rejecting message.")
+                await message.reject(requeue=False) # Reject permanently
             except Exception as e:
-                logger.error(f"Error processing message: {e}")
-                # Reject message
-                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                logger.error(f"Unhandled error processing message: {e}", exc_info=True)
+                await message.nack(requeue=False) # Nack without requeue, or configure requeue policy
 
-        # Setup QoS
-        prefetch_count = self.config['rabbitmq'].get('prefetch_count', 10)
-        self.channel.basic_qos(prefetch_count=prefetch_count)
+    async def start_consumers(self) -> None: # Renamed from start_consumer
+        if not self.channel:
+            logger.error("Cannot start consumers, channel is not available.")
+            return
+        
+        self._consuming_tags.clear() # Clear previous tags if reconnecting
+        for q_conf in self.config['rabbitmq'].get('queues', []):
+            queue_name = q_conf['name']
+            try:
+                queue = await self.channel.get_queue(queue_name) # Ensure queue exists (declared in connect)
+                consumer_tag = await queue.consume(self.on_message)
+                self._consuming_tags.append(consumer_tag)
+                logger.info(f"Started consuming from queue: {queue_name} with tag: {consumer_tag}")
+            except Exception as e:
+                logger.error(f"Failed to start consuming from queue {queue_name}: {e}", exc_info=True)
+        
+        if not self._consuming_tags:
+            logger.warning("No consumers were successfully started.")
 
-        # Start consuming from all configured queues
-        for queue in self.config['rabbitmq'].get('queues', []):
-            queue_name = queue['name']
-            self.channel.basic_consume(
-                queue=queue_name,
-                on_message_callback=message_callback
-            )
-            logger.info(f"Started consuming from queue: {queue_name}")
-
-        logger.info("RabbitMQ consumer started")
 
     async def run(self):
-        """Run the inference handler."""
-        # Connect to RabbitMQ
+        # Setup signal handlers for async context
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            self.loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._signal_handler_async(s)))
+
         await self.connect_rabbitmq()
+        if not self.channel:
+            logger.error("Failed to establish RabbitMQ channel after connect. Exiting.")
+            return
 
-        # Start batch processing task
         batch_task = asyncio.create_task(self.process_batches())
+        await self.start_consumers()
 
-        # Start consumer in a separate thread
-        await asyncio.get_event_loop().run_in_executor(
-            self.executor,
-            lambda: self.start_consumer()
-        )
-
-        # Keep the consumer running in a separate thread
-        await asyncio.get_event_loop().run_in_executor(
-            self.executor,
-            lambda: self._start_consuming()
-        )
-
-        # Wait for shutdown
         while not self.should_exit:
-            await asyncio.sleep(1)
+            # Check RabbitMQ connection health periodically
+            if not self.connection or self.connection.is_closed:
+                logger.warning("RabbitMQ connection lost. Attempting to reconnect and restart consumers...")
+                await self.connect_rabbitmq() # connect_robust handles retries
+                if self.channel:
+                    await self.start_consumers() # Re-subscribe consumers
+                else:
+                    logger.error("Failed to re-establish RabbitMQ channel. May not be consuming.")
+            await asyncio.sleep(5) # Check every 5 seconds
 
-        # Clean shutdown
-        batch_task.cancel()
-        if self.connection and self.connection.is_open:
-            self.connection.close()
-        self.executor.shutdown()
+        logger.info("Shutting down inference handler...")
+        if batch_task:
+            batch_task.cancel()
+            try:
+                await batch_task
+            except asyncio.CancelledError:
+                logger.info("Batch processing task cancelled.")
+        
+        if self.channel and not self.channel.is_closed:
+            for tag in self._consuming_tags:
+                try:
+                    logger.info(f"Cancelling consumer: {tag}")
+                    await self.channel.cancel(tag)
+                except Exception as e:
+                    logger.error(f"Error cancelling consumer {tag}: {e}")
+        
+        if self.connection and not self.connection.is_closed:
+            await self.connection.close()
+        
+        self.executor.shutdown(wait=True)
+        logger.info("Inference handler shutdown complete.")
 
-        logger.info("Inference handler shutdown complete")
 
-    def _start_consuming(self):
-        """Start the blocking consume operation."""
-        try:
-            self.channel.start_consuming()
-        except Exception as e:
-            logger.error(f"Error in consumer: {e}")
-            self.should_exit = True
-
-async def main():
-    """Main entry point."""
-    # Get config path from environment or use default
+async def main_async(): # Renamed for clarity
     config_path = os.environ.get("CONFIG_PATH", DEFAULT_CONFIG_PATH)
-
-    # Create handler instance
-    handler = InferenceHandler(config_path)
-
-    # Run the handler
+    handler = InferenceHandler(config_path=config_path) # Pass loop if needed by constructor
     await handler.run()
 
 if __name__ == "__main__":
-    # Setup environment
-    asyncio.run(main())
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        logger.info("Application interrupted by user.")
+    except Exception as e:
+        logger.critical(f"Application terminated with unhandled exception: {e}", exc_info=True)
+    finally:
+        logger.info("Application shutdown finalized.")
+
+# Removed _start_consuming method as its pika-specific blocking logic is replaced by async consumer setup

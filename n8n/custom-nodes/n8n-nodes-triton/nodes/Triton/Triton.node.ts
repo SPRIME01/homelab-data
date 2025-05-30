@@ -357,6 +357,11 @@ export class Triton implements INodeType {
           // Apply post-processing if specified
           if (options.postProcessingFunction) {
             try {
+              // WARNING: The 'Post-Processing Function' allows arbitrary JavaScript execution.
+              // This is a powerful feature but can be a security risk if the workflow
+              // or the function string can be controlled by untrusted users.
+              // Ensure that only trusted users have permission to configure this node property
+              // or that the function string itself is not derived from untrusted input.
               const postProcessFn = new Function('data', options.postProcessingFunction);
               responseData.result = postProcessFn(responseData.result);
             } catch (error) {
@@ -563,24 +568,26 @@ export class Triton implements INodeType {
     switch (dataType) {
       case 'FP32':
       case 'FP16':
-        // For float types, convert all values to numbers
-        processedData = data.flat().map(Number);
+        // For float types, convert all values to numbers.
+        // Triton expects a flat array for the 'data' field in the JSON payload.
+        // Using flat(Infinity) to ensure deep flattening if data contains nested arrays.
+        processedData = data.flat(Infinity).map(Number);
         break;
 
       case 'INT32':
       case 'INT64':
         // For integer types, convert to integers
-        processedData = data.flat().map(val => Math.floor(Number(val)));
+        processedData = data.flat(Infinity).map(val => Math.floor(Number(val)));
         break;
 
       case 'BOOL':
-        // For boolean, convert to 0 and 1
-        processedData = data.flat().map(val => val ? 1 : 0);
+        // For boolean, convert to 0 and 1 (or true/false if supported by Triton JSON, but 0/1 is safer for 'data' field)
+        processedData = data.flat(Infinity).map(val => val ? 1 : 0);
         break;
 
       case 'STRING':
         // For strings, ensure all values are strings
-        processedData = data.flat().map(String);
+        processedData = data.flat(Infinity).map(String);
         break;
 
       default:
@@ -591,17 +598,38 @@ export class Triton implements INodeType {
     if (providedShape) {
       shape = providedShape;
     } else {
-      // Auto-determine shape based on input data
+      // Auto-determine shape based on input data.
+      // This auto-determination is basic and might need refinement for complex cases.
+      // For a batch of items (data.length > 1), it assumes all items have the same sub-shape.
+      // If data[0] itself is an array, it assumes a 2D shape [batch, features_of_first_item].
+      // This might not correctly represent the true tensor shape if input 'data' items are already
+      // complex multi-dimensional tensors. Users should provide 'Input Shape' for clarity.
       if (Array.isArray(data[0])) {
-        // If input is nested array, use that structure
-        shape = [data.length, data[0].length];
+        shape = [data.length, ...this.getArrayShape(data[0])]; // Try to get shape of first element
       } else {
-        // If flat array, use simple batch dimension
-        shape = [data.length];
+        shape = [data.length]; // Simple 1D array (batch of scalars)
       }
+      // If batchSize from options is meant to be the first dimension, this needs to be reconciled.
+      // Current logic assumes 'data' is a single n8n item's payload which might be a batch for Triton.
     }
 
     return { data: processedData, shape };
+  }
+
+  /**
+   * Helper to get the shape of a potentially nested array.
+   */
+  private getArrayShape(arr: any): number[] {
+    if (!Array.isArray(arr)) {
+      return []; // Scalar
+    }
+    const shape: number[] = [];
+    let current = arr;
+    while (Array.isArray(current)) {
+      shape.push(current.length);
+      current = current[0]; // Descend into the first element
+    }
+    return shape;
   }
 
   /**
